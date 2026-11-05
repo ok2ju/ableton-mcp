@@ -34,6 +34,14 @@ def _events(data):
     return out
 
 
+def test_never_overwrites(tmp_path):
+    path = write_midi_file("beat", NOTES, 120, directory=tmp_path)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="already exists"):
+        write_midi_file("beat", [], 90, directory=tmp_path)
+    assert path.read_bytes() == before
+
+
 def test_four_notes_at_120(tmp_path):
     path = write_midi_file("beat", NOTES, 120, directory=tmp_path)
     data = path.read_bytes()

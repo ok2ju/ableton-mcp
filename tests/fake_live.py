@@ -9,6 +9,19 @@ class Device:
         self.name = name
 
 
+class DrumPad:
+    def __init__(self, note, name, chains=()):
+        self.note, self.name, self.chains = note, name, list(chains)
+
+
+class DrumRack(Device):
+    can_have_drum_pads = True
+
+    def __init__(self, name, pads):
+        super().__init__(name)
+        self.drum_pads = list(pads)
+
+
 class MidiNoteSpecification:
     def __init__(self, pitch, start_time, duration, velocity=100, mute=False):
         self.pitch, self.start_time, self.duration, self.velocity, self.mute = pitch, start_time, duration, velocity, mute
@@ -52,6 +65,9 @@ class ClipSlot:
 
     def create_clip(self, length):
         self.clip = Clip(length)
+
+    def delete_clip(self):
+        self.clip = None
 
     def fire(self):
         self.fired = True
@@ -108,6 +124,9 @@ class Song:
             self.tracks.append(track)
         else:
             self.tracks.insert(index, track)
+
+    def delete_track(self, index):
+        del self.tracks[index]
 
     def stop_playing(self):
         self.is_playing = False

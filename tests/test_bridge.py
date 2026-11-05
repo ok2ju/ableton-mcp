@@ -235,3 +235,13 @@ def test_stdlib_only():
                 continue
             bad += [f"{py.name}: {n}" for n in names if n.split(".")[0] not in allowed]
     assert bad == []
+
+
+def test_delete_track_one_undo_pair(env):
+    bridge, song, sock, conn = env
+    song.create_midi_track(-1)
+    song.create_midi_track(-1)
+    sock.sendall(line(req(conn["token"], "delete_track", {"track": 1})))
+    (out,) = read_responses(bridge, sock, 1)
+    assert out["ok"] and len(song.tracks) == 1
+    assert song.undo_log == ["begin", "end"]

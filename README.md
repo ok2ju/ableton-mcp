@@ -38,16 +38,18 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 19 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 24 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
 | `live_status` | Live version, edition, features; error if the installed Remote Script is out of date | yes |
-| `get_set_overview` | Tempo, tracks, devices, Drum Rack pads (`drum_pads`), clip slots | yes |
+| `get_set_overview` | Tempo, tracks, devices, Drum Rack pads (`drum_pads`), clip slots, each track's `mix`, `scenes`, `return_tracks` | yes |
 | `create_midi_track` | Add a MIDI track (refused in Lite once 8 audio+MIDI tracks exist) | no |
 | `create_midi_clip` | Empty MIDI clip in a slot (length in beats) | no |
 | `delete_track` | Delete a track with its clips and devices; refuses group tracks (destructive, one undo step) | no |
 | `delete_clip` | Delete the clip in a slot (destructive, one undo step) | no |
+| `create_scene` | Add a scene at an index, or `copy_of` a scene with its clips (copy goes directly below; refused in Lite at 16 scenes) | no |
+| `copy_clip` | Copy a clip to an empty slot; an occupied target is refused | no |
 | `write_notes` | Replace all notes in a clip (beats; pitches from `drum_pads`; destructive) | no |
 | `read_notes` | Clip length and notes, in the shape `write_notes` takes | yes |
 | `set_scale` | Set the Set's key (root + scale) and turn on Scale Mode; the melodic generators default to it | no |
@@ -56,8 +58,11 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `create_chord_progression` | Held root-position chords from scale degrees (optional sevenths), into a slot or a `.mid` (destructive) | no |
 | `browse_library` | List one level of Live's browser | yes |
 | `load_from_library` | Load a browser item onto a track | no |
+| `set_track_mix` | Set a track's volume (dB), pan (-50..50), mute, solo and sends (dB, by return letter); one undo step | no |
+| `set_label` | Rename and/or colour a track, a clip (track + slot) or a scene | no |
 | `set_tempo` | Set BPM (20-999) | no |
 | `play_clip` | Fire a clip | no |
+| `fire_scene` | Launch every clip in a scene (not an undo step) | no |
 | `stop` | Stop playback | no |
 | `undo_last` | Undo the last change | no |
 | `write_midi_file` | Write a `.mid` to `~/Music/ableton-mcp/midi/` without Live | no |
@@ -69,6 +74,11 @@ Tools that delete tracks or clips, replace a clip's notes, or write a generated 
 ## Limits
 
 - Live Lite allows 8 audio+MIDI tracks. `create_midi_track` checks this before it calls Live; free a track with `delete_track` or reuse one.
+- Live Lite allows 16 scenes. `create_scene` checks this before it calls Live; name and reuse empty scenes with `set_label`.
+- Live Lite allows 2 return tracks (A and B). Return and master track mixing is not supported; `set_track_mix` covers audio, MIDI and group tracks.
+- Volume and send levels are in dB. In `get_set_overview`, `null` means -inf (silent). `set_track_mix` takes numbers only; to silence a track, use `mute`.
+- Solo is not exclusive: `set_track_mix(solo=true)` does not unsolo other tracks. Unsolo them yourself.
+- Colours are 10 names (red, orange, yellow, lime, green, cyan, blue, purple, pink, grey). Live snaps each to the nearest colour in its chooser.
 - `live_status` compares the Remote Script's protocol version with the server's. After an upgrade, run `install-script` again and restart Live.
 - `read_notes` does not return mute or probability, so a `read_notes` + `write_notes` round trip resets them. Notes that start at or after the clip length never play; `write_notes` reports them as `notes_outside_clip`.
 - `drum_pads` comes from the first Drum Rack on the track: top level first, then one level inside other racks (many Lite kits wrap their Drum Rack in an Instrument Rack). Deeper nesting is not searched.
@@ -86,7 +96,7 @@ Tools that delete tracks or clips, replace a clip's notes, or write a generated 
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
 1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11.
-2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 3`.
+2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 4`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
 5. `undo_last` removes only the last tool's change.
@@ -99,6 +109,12 @@ Tools that delete tracks or clips, replace a clip's notes, or write a generated 
 12. Load a Lite kit with empty pad names (e.g. "Ahlimba Kit"). `create_drum_pattern(style="rock")` resolves kick, snare and closed_hat.
 13. In a fresh Claude Code session, "make a hip hop beat, a bassline and chords in A minor" calls `set_scale`, `create_drum_pattern`, `create_bassline` and `create_chord_progression` (no `write_notes`). All three clips play in key.
 14. With Live closed, "write me a house beat as a MIDI file" writes a `.mid` in `~/Music/ableton-mcp/midi/` that plays on a kit when dragged in.
+15. `call get_overview` (read-only) shows `mix.volume_db` 0.0 and `pan` 0 for a default track, `return_tracks` A/B with their names, and 8 `scenes`. A dB parse error shows here, before any setter runs.
+16. `set_track_mix(track=0, volume_db=-6, pan=25, sends={"A": -12})`: Live shows -6.0 dB, 25R and send A at -12 dB. One `undo_last` restores all three.
+17. `create_scene(copy_of=0)` adds a copy below scene 0 with the same clips. `fire_scene(scene=1)` plays that row.
+18. `set_label` with `color="red"` on a track, a clip and a scene shows red in Live. `copy_clip` into an empty slot plays. Cmd+S still saves.
+19. Lite only: with 16 scenes, `create_scene` returns the Lite error and Live shows no dialog.
+20. In Claude Code, "turn my loop into a song with intro, verse and chorus" names the scenes, copies or varies the clips, colours them by role and fires the scenes in order.
 
 ## Development
 

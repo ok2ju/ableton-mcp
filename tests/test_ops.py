@@ -3,7 +3,7 @@ import pytest
 from AbletonMCP import ops
 from AbletonMCP.bridge import OpError
 from fake_live import (
-    Application, Chain, Device, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, Song, Track, install_fake_live_module,
+    Application, Chain, Clip, Device, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, Song, Track, install_fake_live_module,
 )
 
 
@@ -295,3 +295,136 @@ def test_overview_drum_pads_inside_instrument_rack(live):
     tracks = ops.get_overview(song, app, {})["tracks"]
     assert tracks[0]["drum_pads"] == [{"note": 36, "name": ""}]
     assert tracks[1]["drum_pads"] is None  # only one rack level deep
+
+
+def _err(fn, song, app, args):
+    with pytest.raises(OpError) as e:
+        fn(song, app, args)
+    return e.value
+
+
+def test_overview_mix_scenes_returns(live):
+    import json
+
+    song, app = live
+    song.create_midi_track(-1)
+    song.create_midi_track(-1)
+    song.tracks[1].mixer_device.volume.value = 0
+    ov = ops.get_overview(song, app, {})
+    assert ov["tracks"][0]["mix"] == {"volume_db": 0.0, "pan": 0, "mute": False, "solo": False, "sends": {"A": None, "B": None}}
+    assert ov["tracks"][1]["mix"]["volume_db"] is None
+    assert ov["scenes"][0] == {"index": 0, "name": ""} and ov["scene_count"] == 8
+    assert [(r["send"], r["name"]) for r in ov["return_tracks"]] == [("A", "A-Reverb"), ("B", "B-Delay")]
+    json.dumps(ov, allow_nan=False)
+
+
+def test_db_parses_unicode_minus():
+    class P:
+        def str_for_value(self, v):
+            return "−6.0 dB"
+
+    assert ops._db(P(), 0) == -6.0
+
+
+def test_set_mix(live):
+    song, app = live
+    song.create_midi_track(-1)
+    m = song.tracks[0].mixer_device
+    out = ops.set_mix(song, app, {"track": 0, "volume_db": -12, "pan": -25, "sends": {"A": -6}, "mute": True, "solo": True})
+    assert abs(m.volume.value - 0.55) < 0.001 and out["volume_db"] == -12.0
+    assert m.panning.value == -0.5 and out["pan"] == -25
+    assert out["sends"]["A"] == -6.0 and out["sends"]["B"] is None
+    assert song.tracks[0].mute is True and song.tracks[0].solo is True
+
+
+def test_set_mix_refusals_change_nothing(live):
+    song, app = live
+    song.create_midi_track(-1)
+    e = _err(ops.set_mix, song, app, {"track": 0, "volume_db": 7})
+    assert e.code == "INVALID_ARG" and "6.0" in str(e)
+    e = _err(ops.set_mix, song, app, {"track": 0, "pan": 10, "sends": {"C": 0}})
+    assert e.code == "INVALID_ARG" and "A, B" in str(e)
+    assert song.tracks[0].mixer_device.panning.value == 0.0
+    assert _err(ops.set_mix, song, app, {"track": 0}).code == "INVALID_ARG"
+    assert _err(ops.set_mix, song, app, {"track": 0, "mute": 1}).code == "INVALID_ARG"
+    assert _err(ops.set_mix, song, app, {"track": 0, "sends": {}}).code == "INVALID_ARG"
+
+
+def test_create_scene(live):
+    song, app = live
+    assert ops.create_scene(song, app, {"name": "Outro"}) == {"scene": 8, "name": "Outro", "scene_count": 9}
+    assert song.scenes[8].name == "Outro"
+    song.create_midi_track(-1)
+    song.tracks[0].clip_slots[0].create_clip(4.0)
+    song.scenes[0].name = "old0"
+    assert ops.create_scene(song, app, {"index": 0, "name": "Intro"})["scene"] == 0
+    assert [s.name for s in song.scenes[:2]] == ["Intro", "old0"]
+    assert not song.tracks[0].clip_slots[0].has_clip and song.tracks[0].clip_slots[1].has_clip
+
+
+def test_create_scene_copy_of(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.tracks[0].clip_slots[0].create_clip(8.0)
+    song.tracks[0].clip_slots[0].clip.name = "beat"
+    song.scenes[1].name = "old1"
+    out = ops.create_scene(song, app, {"copy_of": 0, "name": "Verse"})
+    assert out == {"scene": 1, "name": "Verse", "scene_count": 9}
+    copy = song.tracks[0].clip_slots[1].clip
+    assert copy.name == "beat" and copy.length == 8.0 and copy is not song.tracks[0].clip_slots[0].clip
+    assert song.scenes[2].name == "old1"
+    assert _err(ops.create_scene, song, app, {"copy_of": 0, "index": 2}).code == "INVALID_ARG"
+    assert _err(ops.create_scene, song, app, {"copy_of": 99}).code == "NOT_FOUND"
+    assert _err(ops.create_scene, song, app, {"index": 99}).code == "INVALID_ARG"
+
+
+def test_fire_scene(live):
+    song, app = live
+    song.scenes[2].name = "Chorus"
+    assert ops.fire_scene(song, app, {"scene": 2}) == {"scene": 2, "name": "Chorus"}
+    assert song.scenes[2].fired
+    assert _err(ops.fire_scene, song, app, {"scene": 99}).code == "NOT_FOUND"
+
+
+def test_copy_clip(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.tracks.append(Track(has_midi_input=False))
+    slots = song.tracks[0].clip_slots
+    slots[0].create_clip(8.0)
+    slots[0].clip.name = "bass"
+    assert ops.copy_clip(song, app, {"track": 0, "slot": 0, "to_track": 0, "to_slot": 3}) == {
+        "track": 0, "slot": 3, "name": "bass", "length": 8.0,
+    }
+    slots[1].create_clip(4.0)
+    slots[1].clip.name = "keep"
+    e = _err(ops.copy_clip, song, app, {"track": 0, "slot": 0, "to_track": 0, "to_slot": 1})
+    assert e.code == "LIVE_STATE" and slots[1].clip.name == "keep"
+    assert _err(ops.copy_clip, song, app, {"track": 0, "slot": 0, "to_track": 1, "to_slot": 0}).code == "LIVE_STATE"
+    assert _err(ops.copy_clip, song, app, {"track": 0, "slot": 5, "to_track": 0, "to_slot": 6}).code == "NOT_FOUND"
+    song.tracks[1].clip_slots[0].clip = Clip(4.0, is_midi_clip=False)
+    assert _err(ops.copy_clip, song, app, {"track": 1, "slot": 0, "to_track": 0, "to_slot": 7}).code == "LIVE_STATE"
+    song.tracks[1].is_foldable = True
+    assert _err(ops.copy_clip, song, app, {"track": 1, "slot": 0, "to_track": 1, "to_slot": 2}).code == "LIVE_STATE"
+
+
+def test_set_label(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.tracks[0].clip_slots[0].create_clip(4.0)
+    assert ops.set_label(song, app, {"track": 0, "name": "Drums", "color": 0xFF0000}) == {"target": "track", "name": "Drums"}
+    assert song.tracks[0].color == 0xFF0000
+    assert ops.set_label(song, app, {"track": 0, "slot": 0, "name": "beat"})["target"] == "clip"
+    assert song.tracks[0].clip_slots[0].clip.name == "beat"
+    assert ops.set_label(song, app, {"scene": 1, "color": 0x00FF00})["target"] == "scene"
+    assert song.scenes[1].color == 0x00FF00
+
+
+def test_set_label_refusals(live):
+    song, app = live
+    song.create_midi_track(-1)
+    assert _err(ops.set_label, song, app, {"track": 0, "slot": 1, "name": "x"}).code == "NOT_FOUND"
+    assert _err(ops.set_label, song, app, {"slot": 0, "name": "x"}).code == "INVALID_ARG"
+    assert _err(ops.set_label, song, app, {"track": 0, "scene": 0, "name": "x"}).code == "INVALID_ARG"
+    assert _err(ops.set_label, song, app, {"track": 0, "color": 0x1000000}).code == "INVALID_ARG"
+    assert _err(ops.set_label, song, app, {"track": 0}).code == "INVALID_ARG"

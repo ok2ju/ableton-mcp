@@ -1,4 +1,4 @@
-"""MCP stdio server: 19 tools that drive Ableton Live through the AbletonMCP Remote Script.
+"""MCP stdio server: 24 tools that drive Ableton Live through the AbletonMCP Remote Script.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
@@ -16,7 +16,8 @@ from . import midifile, theory
 from .live_client import LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
-PROTOCOL_VERSION = 3  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
+LITE_SCENE_LIMIT = 16
+PROTOCOL_VERSION = 4  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
 INSTALL_HINT = "Run `uv run ableton-mcp install-script` and restart Live."
 
 client = LiveClient()
@@ -40,6 +41,13 @@ ScaleName = Literal[tuple(theory.SCALES)]
 DrumStyle = Literal[tuple(theory.DRUM_STYLES)]
 DrumVoice = Literal[tuple(theory.DRUM_VOICES)]
 BassPattern = Literal[tuple(theory.BASS_PATTERNS)]
+
+# Live snaps any RGB to the nearest colour in its chooser, so names keep the result predictable.
+COLORS = {
+    "red": 0xFF3636, "orange": 0xF66C03, "yellow": 0xFFF034, "lime": 0xBFFB00, "green": 0x3DC300,
+    "cyan": 0x00BFAF, "blue": 0x10A4EE, "purple": 0x886CE4, "pink": 0xFF39D4, "grey": 0x969696,
+}
+Color = Literal[tuple(COLORS)]
 
 
 @dataclass
@@ -87,16 +95,21 @@ def live_status() -> CallToolResult:
 @mcp.tool(annotations=READ_ONLY)
 def get_set_overview() -> CallToolResult:
     """Describe the open Set: tempo, time signature, playing state, and every track with its index, type, devices and clip slots. Indices are 0-based.
-    drum_pads lists {note, name} for each used pad of the track's Drum Rack (null when the track has none): use those notes as pitches in write_notes."""
+    drum_pads lists {note, name} for each used pad of the track's Drum Rack (null when the track has none): use those notes as pitches in write_notes.
+    Each track's mix is {volume_db, pan, mute, solo, sends}: dB values with null = -inf, pan -50..50 (50L..50R),
+    sends keyed by return letter ("A", "B"...). scenes lists {index, name}; return_tracks lists {send, name, devices}."""
     return _call("get_overview")
+
+
+def _hello_and_overview() -> tuple[dict, dict]:
+    return client.call("hello", {}), client.call("get_overview", {})
 
 
 @mcp.tool(annotations=WRITES)
 def create_midi_track(index: int = -1, name: str | None = None) -> CallToolResult:
     """Add a new MIDI track. index -1 puts it at the end. Live Lite allows only 8 audio+MIDI tracks, so reuse an existing empty track when you can."""
     try:
-        hello = client.call("hello", {})
-        overview = client.call("get_overview", {})
+        hello, overview = _hello_and_overview()
     except (LiveUnavailable, LiveTimeout, LiveError) as e:
         return _error(str(e))
     used = sum(1 for t in overview["tracks"] if t["type"] in ("midi", "audio"))
@@ -131,6 +144,32 @@ def delete_track(track: int) -> CallToolResult:
 def delete_clip(track: int, slot: int) -> CallToolResult:
     """Delete the clip in this clip slot. One undo_last restores it."""
     return _call("delete_clip", {"track": track, "slot": slot})
+
+
+@mcp.tool(annotations=WRITES)
+def create_scene(index: int | None = None, name: str | None = None, copy_of: int | None = None) -> CallToolResult:
+    """Add a scene (a row of clip slots across all tracks). index -1 or none puts it at the end.
+    copy_of copies that scene with all its clips and puts the copy directly below it; later scenes shift down by one.
+    Give index or copy_of, not both. Live Lite allows only 16 scenes, so name and reuse empty scenes when you can."""
+    try:
+        hello, overview = _hello_and_overview()
+    except (LiveUnavailable, LiveTimeout, LiveError) as e:
+        return _error(str(e))
+    count = overview["scene_count"]
+    if hello["variant"] == "Lite" and count >= LITE_SCENE_LIMIT:
+        return _error(
+            f"Lite allows {LITE_SCENE_LIMIT} scenes and this Set has {count}; "
+            "name and reuse an empty scene with set_label, or undo_last."
+        )
+    args = {k: v for k, v in {"index": index, "name": name, "copy_of": copy_of}.items() if v is not None}
+    return _call("create_scene", args)
+
+
+@mcp.tool(annotations=WRITES)
+def copy_clip(track: int, slot: int, to_track: int, to_slot: int) -> CallToolResult:
+    """Copy the clip in track/slot to the empty slot to_track/to_slot, e.g. to reuse a loop in another scene.
+    An occupied target is refused: delete_clip it first. A MIDI clip needs a MIDI target track."""
+    return _call("copy_clip", {"track": track, "slot": slot, "to_track": to_track, "to_slot": to_slot})
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -309,6 +348,38 @@ def load_from_library(track: int, root: str, path: list[str]) -> CallToolResult:
 
 
 @mcp.tool(annotations=WRITES)
+def set_track_mix(
+    track: int,
+    volume_db: float | None = None,
+    pan: float | None = None,
+    mute: bool | None = None,
+    solo: bool | None = None,
+    sends: dict[str, float] | None = None,
+) -> CallToolResult:
+    """Set a track's mixer; give only what you want to change. volume_db in dB (0 is Live's default, max +6).
+    pan -50..50 (-50 = 50L, 50 = 50R). sends maps a return letter to dB, e.g. {"A": -12}. To silence a track use mute.
+    solo is not exclusive: Live does not unsolo other tracks, so unsolo them yourself. Returns the track's resulting mix."""
+    fields = {"volume_db": volume_db, "pan": pan, "mute": mute, "solo": solo, "sends": sends}
+    return _call("set_mix", {"track": track, **{k: v for k, v in fields.items() if v is not None}})
+
+
+@mcp.tool(annotations=WRITES)
+def set_label(
+    track: int | None = None,
+    slot: int | None = None,
+    scene: int | None = None,
+    name: str | None = None,
+    color: Color | None = None,
+) -> CallToolResult:
+    """Rename and/or colour a track (track alone), a clip (track + slot) or a scene (scene alone).
+    Live snaps the colour to the nearest one in its chooser. Colour by role, e.g. drums red, bass blue, chords green,
+    and scenes by song section (intro, verse, chorus)."""
+    fields = {"track": track, "slot": slot, "scene": scene, "name": name,
+              "color": None if color is None else COLORS[color]}
+    return _call("set_label", {k: v for k, v in fields.items() if v is not None})
+
+
+@mcp.tool(annotations=WRITES)
 def set_tempo(bpm: float) -> CallToolResult:
     """Set the song tempo in BPM (20-999)."""
     return _call("set_tempo", {"bpm": bpm})
@@ -318,6 +389,12 @@ def set_tempo(bpm: float) -> CallToolResult:
 def play_clip(track: int, slot: int) -> CallToolResult:
     """Start playing the clip in this slot. Live starts the transport if it is stopped."""
     return _call("fire_clip", {"track": track, "slot": slot})
+
+
+@mcp.tool(annotations=WRITES)
+def fire_scene(scene: int) -> CallToolResult:
+    """Launch every clip in this scene (one song section). Live starts the transport if it is stopped. Not an undo step."""
+    return _call("fire_scene", {"scene": scene})
 
 
 @mcp.tool(annotations=WRITES)

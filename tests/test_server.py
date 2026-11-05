@@ -1,6 +1,9 @@
 import asyncio
 import json
 
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
+
 from ableton_mcp import midifile, server, theory
 from ableton_mcp.live_client import CONTROL_SURFACE_HINT, LiveError, LiveUnavailable
 from AbletonMCP import ops
@@ -12,6 +15,8 @@ TOOL_NAMES = [
     "create_midi_clip",
     "delete_track",
     "delete_clip",
+    "create_scene",
+    "copy_clip",
     "write_notes",
     "read_notes",
     "set_scale",
@@ -20,8 +25,11 @@ TOOL_NAMES = [
     "create_chord_progression",
     "browse_library",
     "load_from_library",
+    "set_track_mix",
+    "set_label",
     "set_tempo",
     "play_clip",
+    "fire_scene",
     "stop",
     "undo_last",
     "write_midi_file",
@@ -203,8 +211,8 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
     assert "Could not write the MIDI file" in result.content[0].text
 
 
-def test_protocol_version_is_3():
-    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 3
+def test_protocol_version_is_4():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 4
 
 
 PADS_808 = [
@@ -377,3 +385,51 @@ def test_create_drum_pattern_file_uses_gm_notes(monkeypatch, tmp_path):
     assert result.is_error is False, result.content[0].text
     assert result.structured_content["voices"]["kick"] == {"pitch": 36, "pad": None, "hits": 3}
     assert (tmp_path / "beat.mid").exists()
+
+
+def test_create_scene_refuses_seventeenth_scene_in_lite(monkeypatch):
+    for args in ({"name": "Chorus"}, {"copy_of": 0}):
+        fake = FakeClient({"hello": {"variant": "Lite"}, "get_overview": {"tracks": [], "scene_count": 16}})
+        monkeypatch.setattr(server, "client", fake)
+
+        result = call_tool("create_scene", args)
+
+        assert result.is_error is True and "Lite allows 16 scenes" in result.content[0].text, args
+        assert [op for op, _ in fake.calls] == ["hello", "get_overview"]
+
+
+def test_create_scene_no_limit_outside_lite(monkeypatch):
+    fake = FakeClient({
+        "hello": {"variant": "Standard"},
+        "get_overview": {"tracks": [], "scene_count": 16},
+        "create_scene": {"scene": 1, "name": "", "scene_count": 17},
+    })
+    monkeypatch.setattr(server, "client", fake)
+
+    result = call_tool("create_scene", {"copy_of": 0})
+
+    assert result.is_error is False
+    assert fake.calls[-1] == ("create_scene", {"copy_of": 0})
+
+
+def test_set_label_maps_color_name(monkeypatch):
+    fake = FakeClient({"set_label": {}})
+    monkeypatch.setattr(server, "client", fake)
+
+    ok = call_tool("set_label", {"track": 0, "color": "red"})
+    # Schema validation raises ToolError here; the MCP protocol layer sends it to the client as isError.
+    with pytest.raises(ToolError, match="mauve"):
+        call_tool("set_label", {"track": 0, "color": "mauve"})
+
+    assert ok.is_error is False
+    assert fake.calls == [("set_label", {"track": 0, "color": server.COLORS["red"]})]
+
+
+def test_set_track_mix_sends_only_given_fields(monkeypatch):
+    fake = FakeClient({"set_mix": {"volume_db": 0.0, "pan": 10, "mute": False, "solo": False, "sends": {}}})
+    monkeypatch.setattr(server, "client", fake)
+
+    result = call_tool("set_track_mix", {"track": 1, "pan": 10})
+
+    assert result.is_error is False
+    assert fake.calls == [("set_mix", {"track": 1, "pan": 10})]

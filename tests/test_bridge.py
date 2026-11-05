@@ -256,3 +256,21 @@ def test_write_clip_occupied_slot_one_undo_pair(env):
     (out,) = read_responses(bridge, sock, 1)
     assert out["ok"] and song.tracks[0].clip_slots[0].clip.length == 8.0
     assert song.undo_log == ["begin", "end"]
+
+
+def test_set_mix_and_copy_scene_one_undo_pair_each(env):
+    bridge, song, sock, conn = env
+    song.create_midi_track(-1)
+    sock.sendall(line(req(conn["token"], "set_mix", {"track": 0, "volume_db": -6, "pan": 25, "sends": {"A": -12}})))
+    (out,) = read_responses(bridge, sock, 1)
+    assert out["ok"] and song.undo_log == ["begin", "end"]
+    sock.sendall(line(req(conn["token"], "create_scene", {"copy_of": 0}, rid=2)))
+    (out,) = read_responses(bridge, sock, 1)
+    assert out["ok"] and song.undo_log == ["begin", "end"] * 2
+
+
+def test_fire_scene_no_undo_step(env):
+    bridge, song, sock, conn = env
+    sock.sendall(line(req(conn["token"], "fire_scene", {"scene": 0})))
+    (out,) = read_responses(bridge, sock, 1)
+    assert out["ok"] and song.scenes[0].fired and song.undo_log == []

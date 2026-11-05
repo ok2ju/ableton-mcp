@@ -7,8 +7,8 @@ import sys
 
 from .bridge import OpError
 
-SCRIPT_VERSION = "0.3.0"
-PROTOCOL_VERSION = 3
+SCRIPT_VERSION = "0.4.0"
+PROTOCOL_VERSION = 4
 
 
 def hello(song, app, args):
@@ -43,17 +43,17 @@ def _index(args, key):
     return value
 
 
-def _track(song, args):
-    i = _index(args, "track")
+def _track(song, args, key="track"):
+    i = _index(args, key)
     tracks = list(song.tracks)
     if i >= len(tracks):
         raise OpError("NOT_FOUND", f"no track {i}; the Set has {len(tracks)} tracks")
     return tracks[i]
 
 
-def _slot(song, args):
-    track = _track(song, args)
-    i = _index(args, "slot")
+def _slot(song, args, track_key="track", slot_key="slot"):
+    track = _track(song, args, track_key)
+    i = _index(args, slot_key)
     slots = list(track.clip_slots)
     if i >= len(slots):
         raise OpError("NOT_FOUND", f"no clip slot {i}; the track has {len(slots)}")
@@ -67,6 +67,70 @@ def _midi_clip(song, args):
     if not slot.clip.is_midi_clip:
         raise OpError("LIVE_STATE", "that clip is not a MIDI clip")
     return slot.clip
+
+
+def _scene(song, args, key="scene"):
+    i = _index(args, key)
+    scenes = list(song.scenes)
+    if i >= len(scenes):
+        raise OpError("NOT_FOUND", f"no scene {i}; the Set has {len(scenes)} scenes")
+    return scenes[i]
+
+
+SEND_LETTERS = "ABCDEFGHIJKL"  # Live names return tracks A, B, ... in order
+
+
+def _db(param, value):
+    """dB as Live displays it for this value, e.g. "-6.0 dB" -> -6.0, "-inf dB" -> -inf.
+    Uses Live's own str_for_value, so no fader curve is hard-coded."""
+    text = param.str_for_value(value)
+    try:
+        return float(str(text).replace("\u2212", "-").replace("dB", "").strip())
+    except ValueError:
+        raise RuntimeError(f"could not read dB from {text!r}")
+
+
+def _round_db(db):
+    return None if db == float("-inf") else round(db, 1)  # null: the bridge refuses non-finite JSON
+
+
+def _max_db(param):
+    return _db(param, param.max)
+
+
+def _lowest_value(param, above):
+    """Lowest value whose displayed dB passes above(db), by bisection (assumes the curve rises with value)."""
+    lo, hi = param.min, param.max
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if above(_db(param, mid)):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+def _set_db(param, db):
+    """Set the value Live displays as db. Live rounds the display to 0.1 dB, so aim at the middle
+    of the values that display as db, not at its edge."""
+    start = _lowest_value(param, lambda d: d >= db)
+    end = _lowest_value(param, lambda d: d > db)
+    param.value = (start + end) / 2
+
+
+def _pan(param):
+    return round((param.value - param.min) / (param.max - param.min) * 100 - 50)
+
+
+def _mix(song, track):
+    m = track.mixer_device
+    return {
+        "volume_db": _round_db(_db(m.volume, m.volume.value)),
+        "pan": _pan(m.panning),
+        "mute": bool(track.mute),
+        "solo": bool(track.solo),
+        "sends": {SEND_LETTERS[i]: _round_db(_db(p, p.value)) for i, p in enumerate(m.sends)},
+    }
 
 
 def _track_type(track):
@@ -119,6 +183,7 @@ def get_overview(song, app, args):
             "type": _track_type(t),
             "devices": [d.name for d in t.devices],
             "drum_pads": _drum_pads(t),
+            "mix": _mix(song, t),
             "clip_slots": slots,
         })
     return {
@@ -128,7 +193,12 @@ def get_overview(song, app, args):
         "is_playing": song.is_playing,
         "scale": scale,
         "tracks": tracks,
+        "scenes": [{"index": i, "name": sc.name} for i, sc in enumerate(song.scenes)],
         "scene_count": len(song.scenes),
+        "return_tracks": [
+            {"send": SEND_LETTERS[i], "name": r.name, "devices": [d.name for d in r.devices]}
+            for i, r in enumerate(song.return_tracks)
+        ],
     }
 
 
@@ -271,6 +341,126 @@ def set_scale(song, app, args):
     }
 
 
+def _number(args, key):
+    value = args[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise OpError("INVALID_ARG", f"{key} must be a number")
+    return float(value)
+
+
+def _check_db(param, db, label):
+    top = _max_db(param)
+    if db > top:
+        raise OpError("INVALID_ARG", f"{label} max is {top:+.1f} dB")
+
+
+def set_mix(song, app, args):
+    track = _track(song, args)
+    m = track.mixer_device
+    if not any(k in args for k in ("volume_db", "pan", "mute", "solo", "sends")):
+        raise OpError("INVALID_ARG", "give at least one of volume_db, pan, mute, solo, sends")
+    # Validate everything first, so a bad field changes nothing.
+    volume = pan = None
+    if "volume_db" in args:
+        volume = _number(args, "volume_db")
+        _check_db(m.volume, volume, "volume")
+    if "pan" in args:
+        pan = _number(args, "pan")
+        if not -50 <= pan <= 50:
+            raise OpError("INVALID_ARG", "pan must be -50 (50L) .. 50 (50R)")
+    for key in ("mute", "solo"):
+        if key in args and not isinstance(args[key], bool):
+            raise OpError("INVALID_ARG", f"{key} must be true or false")
+    sends = args.get("sends", {})
+    if not isinstance(sends, dict) or ("sends" in args and not sends):
+        raise OpError("INVALID_ARG", "sends must be an object like {\"A\": -12}")
+    params = dict(zip(SEND_LETTERS, m.sends))
+    for letter in sends:
+        if letter not in params:
+            raise OpError("INVALID_ARG", f"no send {letter!r}; this Set has sends {', '.join(params) or 'none'}")
+        _check_db(params[letter], _number(sends, letter), f"send {letter}")
+    if volume is not None:
+        _set_db(m.volume, volume)
+    if pan is not None:
+        p = m.panning
+        p.value = p.min + (pan + 50) / 100 * (p.max - p.min)
+    if "mute" in args:
+        track.mute = args["mute"]
+    if "solo" in args:  # Live bypasses exclusive solo here: other tracks stay soloed
+        track.solo = args["solo"]
+    for letter, db in sends.items():
+        _set_db(params[letter], float(db))
+    return {"track": args["track"], **_mix(song, track)}
+
+
+def create_scene(song, app, args):
+    count = len(song.scenes)
+    if "copy_of" in args:
+        if "index" in args:
+            raise OpError("INVALID_ARG", "give index or copy_of, not both: the copy always goes directly below")
+        _scene(song, args, "copy_of")
+        song.duplicate_scene(args["copy_of"])
+        new_index = args["copy_of"] + 1
+    else:
+        index = args.get("index", -1)
+        if isinstance(index, bool) or not isinstance(index, int) or not -1 <= index <= count:
+            raise OpError("INVALID_ARG", f"index must be -1 (end) or 0..{count}")
+        song.create_scene(index)
+        new_index = count if index == -1 else index
+    scene = song.scenes[new_index]
+    if args.get("name"):
+        scene.name = str(args["name"])
+    return {"scene": new_index, "name": scene.name, "scene_count": len(song.scenes)}
+
+
+def fire_scene(song, app, args):
+    scene = _scene(song, args)
+    scene.fire()
+    return {"scene": args["scene"], "name": scene.name}
+
+
+def copy_clip(song, app, args):
+    src = _slot(song, args)
+    if not src.has_clip:
+        raise OpError("NOT_FOUND", "the source clip slot is empty")
+    dst_track = _track(song, args, "to_track")
+    if dst_track.is_foldable:
+        raise OpError("LIVE_STATE", "group tracks hold no clips")
+    dst = _slot(song, args, "to_track", "to_slot")
+    if dst.has_clip:
+        raise OpError("LIVE_STATE", "the target clip slot has a clip; delete_clip it first or pick an empty slot")
+    if src.clip.is_midi_clip != bool(dst_track.has_midi_input):
+        kind = "MIDI" if src.clip.is_midi_clip else "audio"
+        raise OpError("LIVE_STATE", f"a {kind} clip needs a {kind} target track")
+    src.duplicate_clip_to(dst)
+    return {"track": args["to_track"], "slot": args["to_slot"], "name": dst.clip.name, "length": dst.clip.length}
+
+
+def set_label(song, app, args):
+    has = {k for k in ("track", "slot", "scene") if args.get(k) is not None}
+    if has == {"track"}:
+        target, obj = "track", _track(song, args)
+    elif has == {"track", "slot"}:
+        slot = _slot(song, args)
+        if not slot.has_clip:
+            raise OpError("NOT_FOUND", "that clip slot is empty")
+        target, obj = "clip", slot.clip
+    elif has == {"scene"}:
+        target, obj = "scene", _scene(song, args)
+    else:
+        raise OpError("INVALID_ARG", "give track (a track), track and slot (a clip), or scene (a scene)")
+    name, color = args.get("name"), args.get("color")
+    if name is None and color is None:
+        raise OpError("INVALID_ARG", "give name, color or both")
+    if color is not None and (isinstance(color, bool) or not isinstance(color, int) or not 0 <= color <= 0xFFFFFF):
+        raise OpError("INVALID_ARG", "color must be an RGB integer 0..0xFFFFFF")
+    if name is not None:
+        obj.name = str(name)
+    if color is not None:
+        obj.color = color  # Live snaps it to the nearest colour in its chooser
+    return {"target": target, "name": obj.name}
+
+
 def set_tempo(song, app, args):
     bpm = float(args["bpm"])
     if not 20 <= bpm <= 999:
@@ -345,7 +535,7 @@ def load_item(song, app, args):
 
 
 # name -> (function, mutating). Mutating ops run inside one undo step.
-# Transport ops (fire_clip, stop) and undo itself are not undoable, so not wrapped.
+# Transport ops (fire_clip, fire_scene, stop) and undo itself are not undoable, so not wrapped.
 OPS = {
     "hello": (hello, False),
     "get_overview": (get_overview, False),
@@ -353,14 +543,19 @@ OPS = {
     "create_clip": (create_clip, True),
     "delete_track": (delete_track, True),
     "delete_clip": (delete_clip, True),
+    "create_scene": (create_scene, True),
+    "copy_clip": (copy_clip, True),
     "get_notes": (get_notes, False),
     "replace_notes": (replace_notes, True),
     "write_clip": (write_clip, True),
     "set_scale": (set_scale, True),
     "set_tempo": (set_tempo, True),
     "fire_clip": (fire_clip, False),
+    "fire_scene": (fire_scene, False),
     "stop": (stop, False),
     "undo": (undo, False),
     "browse": (browse, False),
     "load_item": (load_item, True),
+    "set_mix": (set_mix, True),
+    "set_label": (set_label, True),
 }

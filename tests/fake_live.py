@@ -1,5 +1,6 @@
 """Minimal fakes of Live's Python API, enough for ops and bridge tests."""
 
+import copy
 import sys
 import types
 
@@ -46,9 +47,37 @@ class MidiNote(MidiNoteSpecification):
         self.note_id = note_id
 
 
+class DeviceParameter:
+    """Volume/send fake: a monotonic curve with 0.85 = 0 dB, 1.0 = +6 dB, 0 = -inf. Pan uses min -1, max 1."""
+
+    def __init__(self, value, min=0.0, max=1.0):
+        self.value, self.min, self.max = value, min, max
+
+    def str_for_value(self, value):
+        return "-inf dB" if value == 0 else f"{(value - 0.85) * 40:.1f} dB"
+
+
+class MixerDevice:
+    def __init__(self, sends=2):
+        self.volume = DeviceParameter(0.85)
+        self.panning = DeviceParameter(0.0, -1.0, 1.0)
+        self.sends = [DeviceParameter(0.0) for _ in range(sends)]
+
+
+class Scene:
+    def __init__(self, name=""):
+        self.name = name
+        self.color = 0
+        self.fired = False
+
+    def fire(self):
+        self.fired = True
+
+
 class Clip:
     def __init__(self, length, is_midi_clip=True):
         self.name = ""
+        self.color = 0
         self.length = length
         self.is_midi_clip = is_midi_clip
         self.notes = []
@@ -85,6 +114,9 @@ class ClipSlot:
     def fire(self):
         self.fired = True
 
+    def duplicate_clip_to(self, target):
+        target.clip = copy.deepcopy(self.clip)
+
 
 class Track:
     """Fake Live.Track.Track. No insert_device, like Live 12.1.10."""
@@ -94,6 +126,10 @@ class Track:
         self.has_midi_input = has_midi_input
         self.has_audio_input = not has_midi_input
         self.is_foldable = False
+        self.mute = False
+        self.solo = False
+        self.color = 0
+        self.mixer_device = MixerDevice()
         self.devices = []
         self.clip_slots = [ClipSlot() for _ in range(scenes)]
 
@@ -128,7 +164,8 @@ class Song:
         self.scale_mode = False
         self.is_playing = False
         self.tracks = []
-        self.scenes = [object()] * 8
+        self.scenes = [Scene() for _ in range(8)]
+        self.return_tracks = [Track("A-Reverb", has_midi_input=False, scenes=0), Track("B-Delay", has_midi_input=False, scenes=0)]
         self.view = SongView()
         self.undo_log = []  # "begin" / "end" markers
         self.undo_count = 0
@@ -162,6 +199,21 @@ class Song:
 
     def delete_track(self, index):
         del self.tracks[index]
+
+    def create_scene(self, index):
+        index = len(self.scenes) if index == -1 else index
+        self.scenes.insert(index, Scene())
+        for t in self.tracks:
+            t.clip_slots.insert(index, ClipSlot())
+        return self.scenes[index]
+
+    def duplicate_scene(self, index):
+        self.scenes.insert(index + 1, Scene(self.scenes[index].name))
+        for t in self.tracks:
+            slot = ClipSlot()
+            if t.clip_slots[index].has_clip:
+                t.clip_slots[index].duplicate_clip_to(slot)
+            t.clip_slots.insert(index + 1, slot)
 
     def stop_playing(self):
         self.is_playing = False

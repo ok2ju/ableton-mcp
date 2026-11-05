@@ -1,14 +1,18 @@
 import asyncio
 
 from ableton_mcp import midifile, server
-from ableton_mcp.live_client import CONTROL_SURFACE_HINT, LiveUnavailable
+from ableton_mcp.live_client import CONTROL_SURFACE_HINT, LiveError, LiveUnavailable
+from AbletonMCP import ops
 
 TOOL_NAMES = [
     "live_status",
     "get_set_overview",
     "create_midi_track",
     "create_midi_clip",
+    "delete_track",
+    "delete_clip",
     "write_notes",
+    "read_notes",
     "browse_library",
     "load_from_library",
     "set_tempo",
@@ -17,7 +21,8 @@ TOOL_NAMES = [
     "undo_last",
     "write_midi_file",
 ]
-READ_ONLY_TOOLS = {"live_status", "get_set_overview", "browse_library"}
+READ_ONLY_TOOLS = {"live_status", "get_set_overview", "read_notes", "browse_library"}
+DESTRUCTIVE_TOOLS = {"write_notes", "delete_track", "delete_clip"}
 
 
 class FakeClient:
@@ -47,6 +52,39 @@ def test_tools_list_is_fixed_and_annotated():
     for t in first:
         assert t.annotations.open_world_hint is False
         assert t.annotations.read_only_hint is (t.name in READ_ONLY_TOOLS)
+        # Read-only tools leave destructive_hint unset (None); MCP only reads it when read_only_hint is false.
+        assert (t.annotations.destructive_hint is True) is (t.name in DESTRUCTIVE_TOOLS), t.name
+
+
+def test_protocol_versions_match():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION
+
+
+def test_live_status_old_script_is_error(monkeypatch):
+    monkeypatch.setattr(server, "client", FakeClient({"hello": {"protocol_version": 1, "variant": "Lite"}}))
+
+    result = call_tool("live_status")
+
+    assert result.is_error is True
+    assert "protocol 1" in result.content[0].text and "install-script" in result.content[0].text
+
+
+def test_live_status_current_script_ok(monkeypatch):
+    hello = {"protocol_version": server.PROTOCOL_VERSION, "variant": "Lite"}
+    monkeypatch.setattr(server, "client", FakeClient({"hello": hello}))
+
+    result = call_tool("live_status")
+
+    assert result.is_error is False and result.structured_content == hello
+
+
+def test_unknown_op_gets_install_hint(monkeypatch):
+    monkeypatch.setattr(server, "client", FakeClient(error=LiveError("INVALID_ARG", "unknown op: get_notes")))
+
+    result = call_tool("read_notes", {"track": 0, "slot": 0})
+
+    assert result.is_error is True
+    assert "install-script" in result.content[0].text
 
 
 def test_create_midi_track_refuses_ninth_track_in_lite(monkeypatch):
@@ -58,7 +96,7 @@ def test_create_midi_track_refuses_ninth_track_in_lite(monkeypatch):
     result = call_tool("create_midi_track", {"name": "Drums"})
 
     assert result.is_error is True
-    assert "Lite allows 8 tracks" in result.content[0].text
+    assert "Lite allows 8 tracks" in result.content[0].text and "delete_track" in result.content[0].text
     assert [op for op, _ in fake.calls] == ["hello", "get_overview"]
 
 

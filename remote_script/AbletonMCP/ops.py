@@ -7,8 +7,8 @@ import sys
 
 from .bridge import OpError
 
-SCRIPT_VERSION = "0.1.0"
-PROTOCOL_VERSION = 1
+SCRIPT_VERSION = "0.2.0"
+PROTOCOL_VERSION = 2
 
 
 def hello(song, app, args):
@@ -75,6 +75,14 @@ def _track_type(track):
     return "midi" if track.has_midi_input else "audio"
 
 
+def _drum_pads(track):
+    """Pads with chains in the track's first top-level Drum Rack, or None if it has no Drum Rack."""
+    rack = next((d for d in track.devices if getattr(d, "can_have_drum_pads", False)), None)
+    if rack is None:
+        return None
+    return [{"note": p.note, "name": p.name} for p in rack.drum_pads if p.chains]
+
+
 def get_overview(song, app, args):
     scale = None
     if hasattr(song, "scale_name"):
@@ -95,6 +103,7 @@ def get_overview(song, app, args):
             "name": t.name,
             "type": _track_type(t),
             "devices": [d.name for d in t.devices],
+            "drum_pads": _drum_pads(t),
             "clip_slots": slots,
         })
     return {
@@ -138,16 +147,51 @@ def create_clip(song, app, args):
     return {"track": args["track"], "slot": args["slot"], "name": clip.name, "length": clip.length}
 
 
+def delete_track(song, app, args):
+    track = _track(song, args)
+    if len(song.tracks) == 1:
+        raise OpError("LIVE_STATE", "Live cannot delete the only track in the Set")
+    if track.is_foldable:  # Live would delete every track inside the group too
+        raise OpError("LIVE_STATE", "that is a group track; delete the tracks inside it one by one, or ungroup it in Live")
+    name = track.name
+    song.delete_track(args["track"])
+    return {"deleted": name, "track_count": len(song.tracks)}
+
+
+def delete_clip(song, app, args):
+    slot = _slot(song, args)
+    if not slot.has_clip:
+        raise OpError("NOT_FOUND", "that clip slot is empty")
+    slot.delete_clip()
+    return {"track": args["track"], "slot": args["slot"]}
+
+
+def get_notes(song, app, args):
+    clip = _midi_clip(song, args)
+    notes = sorted(clip.get_all_notes_extended(), key=lambda n: (n.start_time, n.pitch))
+    return {
+        "track": args["track"],
+        "slot": args["slot"],
+        "length": clip.length,
+        "notes": [
+            # velocity as int: write_notes takes ints, so the result round-trips unchanged
+            {"pitch": n.pitch, "start_time": n.start_time, "duration": n.duration, "velocity": int(round(n.velocity))}
+            for n in notes
+        ],
+    }
+
+
 def replace_notes(song, app, args):
     import Live
 
     clip = _midi_clip(song, args)
-    specs = []
+    specs, outside = [], 0
     for n in args["notes"]:
         pitch, velocity = int(n["pitch"]), float(n.get("velocity", 100))
         start, duration = float(n["start_time"]), float(n["duration"])
         if not 0 <= pitch <= 127 or not 1 <= velocity <= 127 or start < 0 or duration <= 0:
             raise OpError("INVALID_ARG", f"invalid note: {n}")
+        outside += start >= clip.length  # these never sound
         specs.append(Live.Clip.MidiNoteSpecification(
             pitch=pitch, start_time=start, duration=duration, velocity=velocity, mute=False
         ))
@@ -157,7 +201,7 @@ def replace_notes(song, app, args):
         clip.remove_notes_by_id(old_ids)
     if specs:
         clip.add_new_notes(tuple(specs))
-    return {"track": args["track"], "slot": args["slot"], "note_count": len(specs)}
+    return {"track": args["track"], "slot": args["slot"], "note_count": len(specs), "notes_outside_clip": outside}
 
 
 def set_tempo(song, app, args):
@@ -240,6 +284,9 @@ OPS = {
     "get_overview": (get_overview, False),
     "create_midi_track": (create_midi_track, True),
     "create_clip": (create_clip, True),
+    "delete_track": (delete_track, True),
+    "delete_clip": (delete_clip, True),
+    "get_notes": (get_notes, False),
     "replace_notes": (replace_notes, True),
     "set_tempo": (set_tempo, True),
     "fire_clip": (fire_clip, False),

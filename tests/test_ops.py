@@ -2,7 +2,9 @@ import pytest
 
 from AbletonMCP import ops
 from AbletonMCP.bridge import OpError
-from fake_live import Application, Device, MidiNoteSpecification, Song, Track, install_fake_live_module
+from fake_live import (
+    Application, Device, DrumPad, DrumRack, MidiNoteSpecification, Song, Track, install_fake_live_module,
+)
 
 
 @pytest.fixture
@@ -127,3 +129,89 @@ def test_undo_with_nothing_to_undo(live):
     with pytest.raises(OpError) as e:
         ops.undo(song, app, {})
     assert e.value.code == "LIVE_STATE" and song.undo_count == 0
+
+
+def _midi_clip_with(song, specs, length=4.0):
+    song.create_midi_track(-1)
+    slot = song.tracks[-1].clip_slots[0]
+    slot.create_clip(length)
+    slot.clip.add_new_notes(tuple(specs))
+    return slot.clip
+
+
+def test_get_notes_returns_write_notes_shape(live):
+    song, app = live
+    _midi_clip_with(song, [MidiNoteSpecification(42, 1.0, 0.25, 89.6), MidiNoteSpecification(36, 0.0, 0.5),
+                           MidiNoteSpecification(38, 1.0, 0.25)])
+    out = ops.get_notes(song, app, {"track": 0, "slot": 0})
+    assert out == {"track": 0, "slot": 0, "length": 4.0, "notes": [
+        {"pitch": 36, "start_time": 0.0, "duration": 0.5, "velocity": 100},
+        {"pitch": 38, "start_time": 1.0, "duration": 0.25, "velocity": 100},
+        {"pitch": 42, "start_time": 1.0, "duration": 0.25, "velocity": 90},
+    ]}
+
+
+def test_get_notes_empty_slot_and_audio_clip(live):
+    song, app = live
+    song.create_midi_track(-1)
+    with pytest.raises(OpError) as e:
+        ops.get_notes(song, app, {"track": 0, "slot": 0})
+    assert e.value.code == "NOT_FOUND"
+    song.tracks[0].clip_slots[1].create_clip(4.0)
+    song.tracks[0].clip_slots[1].clip.is_midi_clip = False
+    with pytest.raises(OpError) as e:
+        ops.get_notes(song, app, {"track": 0, "slot": 1})
+    assert e.value.code == "LIVE_STATE"
+
+
+def test_overview_drum_pads(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.create_midi_track(-1)
+    song.tracks[0].devices = [DrumRack("808 Core Kit", [DrumPad(36, "Kick", chains=["c"]), DrumPad(37, "Rim")])]
+    song.tracks[1].devices = [Device("Operator")]
+    tracks = ops.get_overview(song, app, {})["tracks"]
+    assert tracks[0]["drum_pads"] == [{"note": 36, "name": "Kick"}]
+    assert tracks[0]["devices"] == ["808 Core Kit"]
+    assert tracks[1]["drum_pads"] is None
+
+
+def test_delete_track(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.create_midi_track(-1)
+    with pytest.raises(OpError) as e:
+        ops.delete_track(song, app, {"track": 2})
+    assert e.value.code == "NOT_FOUND"
+    assert ops.delete_track(song, app, {"track": 0}) == {"deleted": "1-MIDI", "track_count": 1}
+    assert [t.name for t in song.tracks] == ["2-MIDI"]
+    with pytest.raises(OpError) as e:
+        ops.delete_track(song, app, {"track": 0})
+    assert e.value.code == "LIVE_STATE"
+
+
+def test_delete_group_track_refused(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.create_midi_track(-1)
+    song.tracks[0].is_foldable = True
+    with pytest.raises(OpError) as e:
+        ops.delete_track(song, app, {"track": 0})
+    assert e.value.code == "LIVE_STATE" and len(song.tracks) == 2
+
+
+def test_delete_clip(live):
+    song, app = live
+    _midi_clip_with(song, [])
+    with pytest.raises(OpError) as e:
+        ops.delete_clip(song, app, {"track": 0, "slot": 1})
+    assert e.value.code == "NOT_FOUND"
+    assert ops.delete_clip(song, app, {"track": 0, "slot": 0}) == {"track": 0, "slot": 0}
+    assert not song.tracks[0].clip_slots[0].has_clip
+
+
+def test_replace_notes_counts_notes_outside_clip(live):
+    song, app = live
+    _midi_clip_with(song, [])
+    out = ops.replace_notes(song, app, {"track": 0, "slot": 0, "notes": [note(36, 0), note(36, 4), note(36, 5)]})
+    assert out["notes_outside_clip"] == 2

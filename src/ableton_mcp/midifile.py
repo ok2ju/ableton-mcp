@@ -55,7 +55,7 @@ def build_smf(notes: list[dict], bpm: float, channel: int = 0) -> bytes:
 
 
 def write_midi_file(name: str, notes: list[dict], bpm: float, directory: Path = MIDI_DIR) -> Path:
-    """Write notes to <directory>/<name>.mid and return the path. Rejects unsafe names."""
+    """Write notes to <directory>/<name>.mid and return the path. Rejects unsafe names and never overwrites."""
     stem = name[:-4] if name.lower().endswith(".mid") else name
     if not _SAFE_NAME.fullmatch(stem):
         raise ValueError("name may only contain letters, digits, space, '_' and '-' (max 64)")
@@ -64,5 +64,7 @@ def write_midi_file(name: str, notes: list[dict], bpm: float, directory: Path = 
     path = directory / f"{stem}.mid"
     if path.resolve().parent != directory.resolve():
         raise ValueError("name escapes the MIDI directory")
+    if path.exists():  # no undo for files, so never replace one
+        raise ValueError(f"{path.name} already exists; pick another name")
     path.write_bytes(data)
     return path

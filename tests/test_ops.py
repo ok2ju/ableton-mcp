@@ -3,7 +3,7 @@ import pytest
 from AbletonMCP import ops
 from AbletonMCP.bridge import OpError
 from fake_live import (
-    Application, Device, DrumPad, DrumRack, MidiNoteSpecification, Song, Track, install_fake_live_module,
+    Application, Chain, Device, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, Song, Track, install_fake_live_module,
 )
 
 
@@ -215,3 +215,83 @@ def test_replace_notes_counts_notes_outside_clip(live):
     _midi_clip_with(song, [])
     out = ops.replace_notes(song, app, {"track": 0, "slot": 0, "notes": [note(36, 0), note(36, 4), note(36, 5)]})
     assert out["notes_outside_clip"] == 2
+
+
+def test_write_clip_empty_slot(live):
+    song, app = live
+    song.create_midi_track(-1)
+    out = ops.write_clip(song, app, {"track": 0, "slot": 0, "length_beats": 8, "name": "Beat",
+                                     "notes": [note(36, 0), note(38, 9)]})
+    assert out == {"track": 0, "slot": 0, "name": "Beat", "length": 8.0, "note_count": 2,
+                   "notes_outside_clip": 1, "replaced": False}
+    clip = song.tracks[0].clip_slots[0].clip
+    assert clip.length == 8.0 and [n.pitch for n in clip.notes] == [36, 38]
+
+
+def test_write_clip_replaces_midi_clip(live):
+    song, app = live
+    old = _midi_clip_with(song, [MidiNoteSpecification(60, 0, 1)], length=4.0)
+    out = ops.write_clip(song, app, {"track": 0, "slot": 0, "length_beats": 8, "notes": [note(36, 0)]})
+    clip = song.tracks[0].clip_slots[0].clip
+    assert out["replaced"] is True
+    assert clip is not old and clip.length == 8.0 and [n.pitch for n in clip.notes] == [36]
+
+
+def test_write_clip_audio_clip_and_audio_track(live):
+    song, app = live
+    _midi_clip_with(song, []).is_midi_clip = False
+    with pytest.raises(OpError) as e:
+        ops.write_clip(song, app, {"track": 0, "slot": 0, "length_beats": 8, "notes": []})
+    assert e.value.code == "LIVE_STATE"
+    song.tracks.append(Track(has_midi_input=False))
+    with pytest.raises(OpError) as e:
+        ops.write_clip(song, app, {"track": 1, "slot": 0, "length_beats": 8, "notes": []})
+    assert e.value.code == "LIVE_STATE"
+
+
+def test_write_clip_invalid_note_leaves_clip(live):
+    song, app = live
+    old = _midi_clip_with(song, [MidiNoteSpecification(60, 0, 1)], length=4.0)
+    with pytest.raises(OpError) as e:
+        ops.write_clip(song, app, {"track": 0, "slot": 0, "length_beats": 8, "notes": [note(36, 0), note(128, 1)]})
+    assert e.value.code == "INVALID_ARG"
+    assert song.tracks[0].clip_slots[0].clip is old and [n.pitch for n in old.notes] == [60]
+
+
+def test_set_scale(live):
+    song, app = live
+    out = ops.set_scale(song, app, {"root_note": 9, "scale_name": "Minor"})
+    assert out == {"root_note": 9, "name": "Minor", "intervals": [0, 2, 3, 5, 7, 8, 10], "scale_mode": True}
+    assert (song.root_note, song.scale_name, song.scale_mode) == (9, "Minor", True)
+
+
+def test_set_scale_rejects_unknown_name_and_bad_root(live):
+    song, app = live
+    with pytest.raises(OpError) as e:
+        ops.set_scale(song, app, {"root_note": 0, "scale_name": "Hungarian Gypsy"})
+    assert e.value.code == "INVALID_ARG" and song.scale_mode is False
+    with pytest.raises(OpError) as e:
+        ops.set_scale(song, app, {"root_note": 12, "scale_name": "Minor"})
+    assert e.value.code == "INVALID_ARG"
+
+
+def test_set_scale_without_scale_api_changes_nothing():
+    import types
+
+    song = types.SimpleNamespace(root_note=0, scale_name="Major")  # an older Live: no scale_mode/scale_intervals
+    with pytest.raises(OpError) as e:
+        ops.set_scale(song, None, {"root_note": 9, "scale_name": "Minor"})
+    assert e.value.code == "LIVE_STATE" and (song.root_note, song.scale_name) == (0, "Major")
+
+
+def test_overview_drum_pads_inside_instrument_rack(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.create_midi_track(-1)
+    inner = DrumRack("Drum Rack", [DrumPad(36, "", chains=["c"])])
+    song.tracks[0].devices = [InstrumentRack("Ahlimba Kit", [Chain([Device("Utility"), inner])])]
+    deeper = InstrumentRack("Outer", [Chain([InstrumentRack("Inner", [Chain([inner])])])])
+    song.tracks[1].devices = [deeper]
+    tracks = ops.get_overview(song, app, {})["tracks"]
+    assert tracks[0]["drum_pads"] == [{"note": 36, "name": ""}]
+    assert tracks[1]["drum_pads"] is None  # only one rack level deep

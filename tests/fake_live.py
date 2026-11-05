@@ -14,6 +14,19 @@ class DrumPad:
         self.note, self.name, self.chains = note, name, list(chains)
 
 
+class Chain:
+    def __init__(self, devices):
+        self.devices = list(devices)
+
+
+class InstrumentRack(Device):
+    can_have_chains = True
+
+    def __init__(self, name, chains):
+        super().__init__(name)
+        self.chains = list(chains)
+
+
 class DrumRack(Device):
     can_have_drum_pads = True
 
@@ -97,13 +110,22 @@ class SongView:
         self.selected_track = None
 
 
+SCALE_INTERVALS = {
+    "Major": [0, 2, 4, 5, 7, 9, 11],
+    "Minor": [0, 2, 3, 5, 7, 8, 10],
+    "Dorian": [0, 2, 3, 5, 7, 9, 10],
+    "Minor Pentatonic": [0, 3, 5, 7, 10],
+}
+
+
 class Song:
     def __init__(self):
         self.tempo = 120.0
         self.signature_numerator = 4
         self.signature_denominator = 4
         self.root_note = 0
-        self.scale_name = "Major"
+        self._scale_name = "Major"
+        self.scale_mode = False
         self.is_playing = False
         self.tracks = []
         self.scenes = [object()] * 8
@@ -111,6 +133,19 @@ class Song:
         self.undo_log = []  # "begin" / "end" markers
         self.undo_count = 0
         self.can_undo = True
+
+    @property
+    def scale_name(self):
+        return self._scale_name
+
+    @scale_name.setter
+    def scale_name(self, name):
+        if name in SCALE_INTERVALS:  # Live ignores unknown names
+            self._scale_name = name
+
+    @property
+    def scale_intervals(self):
+        return tuple(SCALE_INTERVALS[self._scale_name])
 
     def begin_undo_step(self):
         self.undo_log.append("begin")

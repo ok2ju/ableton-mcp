@@ -7,8 +7,8 @@ import sys
 
 from .bridge import OpError
 
-SCRIPT_VERSION = "0.2.0"
-PROTOCOL_VERSION = 2
+SCRIPT_VERSION = "0.3.0"
+PROTOCOL_VERSION = 3
 
 
 def hello(song, app, args):
@@ -75,9 +75,24 @@ def _track_type(track):
     return "midi" if track.has_midi_input else "audio"
 
 
+def _find_drum_rack(devices, depth):
+    """First Drum Rack among devices; then, depth levels down, inside other racks' chains."""
+    for d in devices:
+        if getattr(d, "can_have_drum_pads", False):
+            return d
+    if depth > 0:
+        for d in devices:
+            for chain in getattr(d, "chains", ()) if getattr(d, "can_have_chains", False) else ():
+                rack = _find_drum_rack(chain.devices, depth - 1)
+                if rack is not None:
+                    return rack
+    return None
+
+
 def _drum_pads(track):
-    """Pads with chains in the track's first top-level Drum Rack, or None if it has no Drum Rack."""
-    rack = next((d for d in track.devices if getattr(d, "can_have_drum_pads", False)), None)
+    """Pads with chains in the track's Drum Rack, or None if it has none.
+    Searches top level, then one rack deep: 58 of 141 Lite kits wrap their Drum Rack in an Instrument Rack."""
+    rack = _find_drum_rack(track.devices, depth=1)
     if rack is None:
         return None
     return [{"note": p.note, "name": p.name} for p in rack.drum_pads if p.chains]
@@ -181,20 +196,26 @@ def get_notes(song, app, args):
     }
 
 
-def replace_notes(song, app, args):
+def _note_specs(notes, clip_length):
+    """Validate notes and build Live note specs. Returns (specs, count of notes starting past clip_length)."""
     import Live
 
-    clip = _midi_clip(song, args)
     specs, outside = [], 0
-    for n in args["notes"]:
+    for n in notes:
         pitch, velocity = int(n["pitch"]), float(n.get("velocity", 100))
         start, duration = float(n["start_time"]), float(n["duration"])
         if not 0 <= pitch <= 127 or not 1 <= velocity <= 127 or start < 0 or duration <= 0:
             raise OpError("INVALID_ARG", f"invalid note: {n}")
-        outside += start >= clip.length  # these never sound
+        outside += start >= clip_length  # these never sound
         specs.append(Live.Clip.MidiNoteSpecification(
             pitch=pitch, start_time=start, duration=duration, velocity=velocity, mute=False
         ))
+    return specs, outside
+
+
+def replace_notes(song, app, args):
+    clip = _midi_clip(song, args)
+    specs, outside = _note_specs(args["notes"], clip.length)
     # Remove by id: covers notes outside the loop range too.
     old_ids = [note.note_id for note in clip.get_all_notes_extended()]
     if old_ids:
@@ -202,6 +223,52 @@ def replace_notes(song, app, args):
     if specs:
         clip.add_new_notes(tuple(specs))
     return {"track": args["track"], "slot": args["slot"], "note_count": len(specs), "notes_outside_clip": outside}
+
+
+def write_clip(song, app, args):
+    """Create a MIDI clip with notes in one step, replacing a MIDI clip already in the slot."""
+    track = _track(song, args)
+    if not track.has_midi_input:
+        raise OpError("LIVE_STATE", "clips with notes need a MIDI track")
+    slot = _slot(song, args)
+    if slot.has_clip and not slot.clip.is_midi_clip:
+        raise OpError("LIVE_STATE", "that slot holds an audio clip")
+    length = float(args["length_beats"])
+    if not 0 < length <= 1024:
+        raise OpError("INVALID_ARG", "length_beats must be in (0, 1024]")
+    specs, outside = _note_specs(args["notes"], length)  # before deleting: a bad note leaves the slot as it was
+    replaced = slot.has_clip
+    if replaced:
+        slot.delete_clip()
+    slot.create_clip(length)
+    clip = slot.clip
+    if args.get("name"):
+        clip.name = str(args["name"])
+    if specs:
+        clip.add_new_notes(tuple(specs))
+    return {
+        "track": args["track"], "slot": args["slot"], "name": clip.name, "length": clip.length,
+        "note_count": len(specs), "notes_outside_clip": outside, "replaced": replaced,
+    }
+
+
+def set_scale(song, app, args):
+    root, name = args["root_note"], args["scale_name"]
+    if isinstance(root, bool) or not isinstance(root, int) or not 0 <= root <= 11:
+        raise OpError("INVALID_ARG", "root_note must be an integer 0..11")
+    if not isinstance(name, str) or not name:
+        raise OpError("INVALID_ARG", "scale_name must be a non-empty string")
+    if not all(hasattr(song, a) for a in ("scale_name", "scale_mode", "scale_intervals")):
+        raise OpError("LIVE_STATE", "this Live version has no Set scale API")
+    song.scale_name = name
+    if song.scale_name != name:  # Live ignores names it does not know
+        raise OpError("INVALID_ARG", f"Live did not accept scale name {name!r}")
+    song.root_note = root
+    song.scale_mode = True
+    return {
+        "root_note": song.root_note, "name": song.scale_name,
+        "intervals": list(song.scale_intervals), "scale_mode": song.scale_mode,
+    }
 
 
 def set_tempo(song, app, args):
@@ -288,6 +355,8 @@ OPS = {
     "delete_clip": (delete_clip, True),
     "get_notes": (get_notes, False),
     "replace_notes": (replace_notes, True),
+    "write_clip": (write_clip, True),
+    "set_scale": (set_scale, True),
     "set_tempo": (set_tempo, True),
     "fire_clip": (fire_clip, False),
     "stop": (stop, False),

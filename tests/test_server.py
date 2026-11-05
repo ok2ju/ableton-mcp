@@ -1,6 +1,7 @@
 import asyncio
+import json
 
-from ableton_mcp import midifile, server
+from ableton_mcp import midifile, server, theory
 from ableton_mcp.live_client import CONTROL_SURFACE_HINT, LiveError, LiveUnavailable
 from AbletonMCP import ops
 
@@ -13,6 +14,10 @@ TOOL_NAMES = [
     "delete_clip",
     "write_notes",
     "read_notes",
+    "set_scale",
+    "create_drum_pattern",
+    "create_bassline",
+    "create_chord_progression",
     "browse_library",
     "load_from_library",
     "set_tempo",
@@ -22,7 +27,10 @@ TOOL_NAMES = [
     "write_midi_file",
 ]
 READ_ONLY_TOOLS = {"live_status", "get_set_overview", "read_notes", "browse_library"}
-DESTRUCTIVE_TOOLS = {"write_notes", "delete_track", "delete_clip"}
+DESTRUCTIVE_TOOLS = {
+    "write_notes", "delete_track", "delete_clip",
+    "create_drum_pattern", "create_bassline", "create_chord_progression",
+}
 
 
 class FakeClient:
@@ -193,3 +201,179 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
 
     assert result.is_error is True
     assert "Could not write the MIDI file" in result.content[0].text
+
+
+def test_protocol_version_is_3():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 3
+
+
+PADS_808 = [
+    {"note": 36, "name": "Bass Drum"}, {"note": 37, "name": "Rim Shot"},
+    {"note": 38, "name": "Snare Drum"}, {"note": 39, "name": "Hand Clap"},
+    {"note": 42, "name": "Closed Hi Hat"}, {"note": 46, "name": "Open Hi Hat"},
+    {"note": 49, "name": "Cymbal"}, {"note": 51, "name": "Claves"},
+]
+
+
+def overview(drum_pads=None, numerator=4, scale=None):
+    return {
+        "signature_numerator": numerator,
+        "signature_denominator": 4,
+        "scale": scale or {"root_note": 0, "name": "Major"},
+        "tracks": [{"index": 0, "name": "Kit", "type": "midi", "drum_pads": drum_pads}],
+    }
+
+
+def write_clip_echo(args):
+    return {"track": args["track"], "slot": args["slot"], "name": args["name"], "length": args["length_beats"],
+            "note_count": len(args["notes"]), "notes_outside_clip": 0, "replaced": False}
+
+
+class EchoClient(FakeClient):
+    """FakeClient whose write_clip answer is built from the request."""
+
+    def call(self, op, args=None):
+        if op == "write_clip":
+            self.calls.append((op, args))
+            return write_clip_echo(args)
+        return super().call(op, args)
+
+
+def test_create_drum_pattern_writes_to_kit_pads(monkeypatch):
+    fake = EchoClient({"get_overview": overview(PADS_808)})
+    monkeypatch.setattr(server, "client", fake)
+
+    result = call_tool("create_drum_pattern", {"style": "house", "track": 0, "slot": 1})
+
+    assert result.is_error is False, result.content[0].text
+    assert [op for op, _ in fake.calls] == ["get_overview", "write_clip"]
+    written = fake.calls[1][1]
+    assert written["slot"] == 1 and written["length_beats"] == 4
+    assert {n["pitch"] for n in written["notes"]} <= {p["note"] for p in PADS_808}
+    assert result.structured_content["voices"]["kick"]["pad"] == "Bass Drum"
+    assert result.structured_content["missing_voices"] == []
+
+
+def test_create_drum_pattern_layer(monkeypatch):
+    fake = EchoClient({"get_overview": overview(PADS_808)})
+    monkeypatch.setattr(server, "client", fake)
+
+    result = call_tool("create_drum_pattern", {
+        "style": None, "layers": [{"voice": "kick", "pulses": 3, "steps": 8}], "track": 0, "slot": 0,
+    })
+
+    assert result.is_error is False, result.content[0].text
+    assert [n["start_time"] for n in fake.calls[1][1]["notes"]] == [0, 0.75, 1.5, 2, 2.75, 3.5]
+
+
+def test_create_drum_pattern_needs_drum_rack(monkeypatch):
+    fake = EchoClient({"get_overview": overview(None)})
+    monkeypatch.setattr(server, "client", fake)
+
+    result = call_tool("create_drum_pattern", {"track": 0, "slot": 0})
+
+    assert result.is_error is True and "load_from_library" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["get_overview"]
+
+
+def test_generators_refuse_non_4_4(monkeypatch):
+    fake = EchoClient({"get_overview": overview(PADS_808, numerator=3)})
+    monkeypatch.setattr(server, "client", fake)
+
+    result = call_tool("create_drum_pattern", {"track": 0, "slot": 0})
+
+    assert result.is_error is True and "4/4" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["get_overview"]
+
+
+def test_create_chord_progression_uses_set_scale(monkeypatch):
+    fake = EchoClient({"get_overview": overview(scale={"root_note": 2, "name": "Dorian"})})
+    monkeypatch.setattr(server, "client", fake)
+
+    result = call_tool("create_chord_progression", {"degrees": [1, 4], "track": 0, "slot": 0})
+
+    assert result.is_error is False, result.content[0].text
+    assert result.structured_content["chords"][0] == "Dm"
+    assert fake.calls[1][1]["name"] == "Dm G"
+
+
+def test_create_bassline_file_needs_no_live(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "client", FakeClient(error=AssertionError("Live must not be called")))
+    monkeypatch.setattr(midifile, "MIDI_DIR", tmp_path)
+
+    ok = call_tool("create_bassline", {"pattern": "eighths", "degrees": [1, 4], "file_name": "bass", "root": "A", "scale": "Minor"})
+    no_root = call_tool("create_bassline", {"file_name": "bass2", "scale": "Minor"})
+    both = call_tool("create_bassline", {"file_name": "bass3", "track": 0, "slot": 0, "root": "A", "scale": "Minor"})
+    neither = call_tool("create_bassline", {"root": "A", "scale": "Minor"})
+
+    assert ok.is_error is False, ok.content[0].text
+    assert (tmp_path / "bass.mid").read_bytes().startswith(b"MThd")
+    assert ok.structured_content["note_count"] == 16
+    assert no_root.is_error is True and both.is_error is True and neither.is_error is True
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bass.mid"]
+
+
+def test_set_scale(monkeypatch):
+    fake = FakeClient({"set_scale": {"root_note": 3, "name": "Minor Pentatonic", "intervals": [0, 3, 5, 7, 10], "scale_mode": True}})
+    monkeypatch.setattr(server, "client", fake)
+
+    ok = call_tool("set_scale", {"root": "Eb", "scale": "Minor Pentatonic"})
+    bad = call_tool("set_scale", {"root": "H", "scale": "Major"})
+
+    assert ok.is_error is False
+    assert bad.is_error is True
+    assert fake.calls == [("set_scale", {"root_note": 3, "scale_name": "Minor Pentatonic"})]
+
+
+def test_literals_match_theory_tables():
+    from typing import get_args
+
+    assert get_args(server.ScaleName) == tuple(theory.SCALES)
+    assert get_args(server.DrumStyle) == tuple(theory.DRUM_STYLES)
+    assert get_args(server.DrumVoice) == tuple(theory.DRUM_VOICES)
+    assert get_args(server.BassPattern) == tuple(theory.BASS_PATTERNS)
+    tool = {t.name: t for t in asyncio.run(server.mcp.list_tools())}["set_scale"]
+    assert "Minor Pentatonic" in json.dumps(tool.input_schema)
+
+
+def test_generator_refusals_never_write(monkeypatch):
+    cases = [
+        ({"get_overview": overview([])}, "create_drum_pattern", {"track": 0, "slot": 0}, "no pad"),
+        ({"get_overview": overview(PADS_808)}, "create_drum_pattern",
+         {"style": None, "layers": [{"voice": "kick", "pulses": 9, "steps": 8}], "track": 0, "slot": 0}, "euclid"),
+        ({"get_overview": overview(PADS_808)}, "create_drum_pattern", {"track": 5, "slot": 0}, "No track 5"),
+        ({"get_overview": {**overview(), "scale": None}}, "create_bassline", {"track": 0, "slot": 0}, "no Set scale"),
+        ({"get_overview": overview(scale={"root_note": 0, "name": "Bhairav"})}, "create_bassline",
+         {"track": 0, "slot": 0}, "'Bhairav' is not supported"),
+    ]
+    for results, tool, args, message in cases:
+        fake = EchoClient(results)
+        monkeypatch.setattr(server, "client", fake)
+        result = call_tool(tool, args)
+        assert result.is_error is True and message in result.content[0].text, (tool, args, result.content[0].text)
+        assert [op for op, _ in fake.calls] == ["get_overview"]
+
+
+def test_write_clip_error_is_passed_back(monkeypatch):
+    class Refuses(FakeClient):
+        def call(self, op, args=None):
+            if op == "write_clip":
+                raise LiveError("LIVE_STATE", "that clip is not a MIDI clip")
+            return super().call(op, args)
+
+    monkeypatch.setattr(server, "client", Refuses({"get_overview": overview(PADS_808)}))
+
+    result = call_tool("create_drum_pattern", {"track": 0, "slot": 0})
+
+    assert result.is_error is True and "not a MIDI clip" in result.content[0].text
+
+
+def test_create_drum_pattern_file_uses_gm_notes(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "client", FakeClient(error=AssertionError("Live must not be called")))
+    monkeypatch.setattr(midifile, "MIDI_DIR", tmp_path)
+
+    result = call_tool("create_drum_pattern", {"style": "rock", "file_name": "beat"})
+
+    assert result.is_error is False, result.content[0].text
+    assert result.structured_content["voices"]["kick"] == {"pitch": 36, "pad": None, "hits": 3}
+    assert (tmp_path / "beat.mid").exists()

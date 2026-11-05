@@ -1,4 +1,4 @@
-"""MCP stdio server: 15 tools that drive Ableton Live through the AbletonMCP Remote Script.
+"""MCP stdio server: 19 tools that drive Ableton Live through the AbletonMCP Remote Script.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
@@ -7,15 +7,16 @@ Tests replace the module global `client` with a fake.
 
 import json
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from . import midifile
+from . import midifile, theory
 from .live_client import LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
-PROTOCOL_VERSION = 2  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
+PROTOCOL_VERSION = 3  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
 INSTALL_HINT = "Run `uv run ableton-mcp install-script` and restart Live."
 
 client = LiveClient()
@@ -32,6 +33,21 @@ class Note:
     start_time: float  # beats from the clip start
     duration: float  # beats
     velocity: int = 100  # 1-127
+
+
+# Literal over the theory tables' keys, so the tool schema lists the exact choices.
+ScaleName = Literal[tuple(theory.SCALES)]
+DrumStyle = Literal[tuple(theory.DRUM_STYLES)]
+DrumVoice = Literal[tuple(theory.DRUM_VOICES)]
+BassPattern = Literal[tuple(theory.BASS_PATTERNS)]
+
+
+@dataclass
+class DrumLayer:
+    voice: DrumVoice
+    pulses: int  # hits spread as evenly as possible over steps (a Euclidean rhythm)
+    steps: int = 16  # pattern length in sixteenth notes; it repeats over the clip
+    rotation: int = 0  # shift the pattern left by this many steps
 
 
 def _ok(result) -> CallToolResult:
@@ -130,6 +146,150 @@ def read_notes(track: int, slot: int) -> CallToolResult:
     """Return the clip's length and its notes, in the same shape write_notes takes, sorted by start_time then pitch.
     Mute and probability are not returned, so a read_notes + write_notes round trip resets them."""
     return _call("get_notes", {"track": track, "slot": slot})
+
+
+@mcp.tool(annotations=WRITES)
+def set_scale(root: str, scale: ScaleName) -> CallToolResult:
+    """Set the Set's key, e.g. root "A", scale "Minor", and turn on Scale Mode so Live's MIDI editor highlights the scale's notes.
+    create_bassline and create_chord_progression use this key when you leave root and scale out."""
+    try:
+        root_note = theory.parse_root(root)
+    except ValueError as e:
+        return _error(str(e))
+    return _call("set_scale", {"root_note": root_note, "scale_name": scale})
+
+
+def _live_target(track: int | None, slot: int | None, file_name: str | None):
+    """Check there is exactly one destination. For Live, read the Set and return (overview, track info);
+    for a file, return (None, None). Refusals raise ValueError."""
+    if file_name is not None:
+        if track is not None or slot is not None:
+            raise ValueError("Give either track and slot (write into Live) or file_name (write a .mid file), not both.")
+        return None, None
+    if track is None or slot is None:
+        raise ValueError("Give track and slot to write into Live, or file_name to write a .mid file.")
+    overview = client.call("get_overview", {})
+    signature = (overview["signature_numerator"], overview["signature_denominator"])
+    if signature != (4, 4):
+        raise ValueError(f"Generators support 4/4 only; this Set is in {signature[0]}/{signature[1]}.")
+    if not 0 <= track < len(overview["tracks"]):
+        raise ValueError(f"No track {track}; the Set has {len(overview['tracks'])} tracks.")
+    return overview, overview["tracks"][track]
+
+
+def _key(root: str | None, scale: str | None, overview: dict | None) -> tuple[str, str]:
+    """Missing root or scale comes from the Set's scale."""
+    if root is not None and scale is not None:
+        return root, scale
+    if overview is None:
+        raise ValueError("Without Live, give both root and scale.")
+    if overview.get("scale") is None:
+        raise ValueError("This Live version reports no Set scale; give both root and scale.")
+    current = overview["scale"]
+    if scale is None and current["name"] not in theory.SCALES:
+        raise ValueError(f"The Set's scale {current['name']!r} is not supported; pass scale (one of: {', '.join(theory.SCALES)}).")
+    return (root if root is not None else theory.NOTE_NAMES[current["root_note"]],
+            scale if scale is not None else current["name"])
+
+
+def _write_generated(notes, length, name, summary, track, slot, file_name) -> CallToolResult:
+    if file_name is not None:
+        try:
+            path = midifile.write_midi_file(file_name, notes, 120, directory=midifile.MIDI_DIR)
+        except ValueError as e:
+            return _error(str(e))
+        except OSError as e:
+            return _error(f"Could not write the MIDI file: {e}")
+        return _ok({"path": str(path), "note_count": len(notes), **summary})
+    result = _call("write_clip", {"track": track, "slot": slot, "length_beats": length, "name": name, "notes": notes})
+    if result.is_error:
+        return result
+    return _ok({**result.structured_content, **summary})
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def create_drum_pattern(
+    style: DrumStyle | None = "house",
+    bars: int = 1,
+    layers: list[DrumLayer] | None = None,
+    track: int | None = None,
+    slot: int | None = None,
+    file_name: str | None = None,
+    name: str | None = None,
+) -> CallToolResult:
+    """Write a drum beat in a style, repeated over bars. The track must hold a Drum Rack kit; hits go to the pads
+    that match each voice (kick, snare, hats...), and voices the kit lacks are listed in missing_voices.
+    layers add Euclidean rhythms, e.g. {voice: "perc", pulses: 3, steps: 8}; a layer replaces the style's part for
+    that voice. style null with layers gives layers only. The result's about explains the style for a beginner.
+    Destination: track + slot writes a clip into Live and replaces any clip in that slot (one undo_last restores it);
+    file_name instead writes a 120 BPM .mid file to ~/Music/ableton-mcp/midi/ and works with Live closed. Never creates tracks. 4/4 only."""
+    try:
+        overview, info = _live_target(track, slot, file_name)
+        if info is not None and info.get("drum_pads") is None:
+            raise ValueError(
+                f"Track {track} has no Drum Rack. Load a kit first with load_from_library(track={track}, root=\"drums\", ...)."
+            )
+        pitches = theory.pick_drum_pitches(info["drum_pads"] if info else None)
+        notes, length, summary = theory.drum_notes(style, bars, [asdict(x) for x in layers or []], pitches)
+        if not notes:  # never replace a clip with an empty one
+            raise ValueError(f"The kit has no pad for any voice this pattern uses: {', '.join(summary['missing_voices'])}.")
+    except (ValueError, LiveUnavailable, LiveTimeout, LiveError) as e:
+        return _error(str(e))
+    return _write_generated(notes, length, name or style or "drums", summary, track, slot, file_name)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def create_bassline(
+    pattern: BassPattern = "eighths",
+    degrees: list[int] | None = None,
+    root: str | None = None,
+    scale: ScaleName | None = None,
+    bars: int | None = None,
+    octave: int = 1,
+    track: int | None = None,
+    slot: int | None = None,
+    file_name: str | None = None,
+    name: str | None = None,
+) -> CallToolResult:
+    """Write a bassline in a key. degrees are scale degrees, one per bar, cycled (default [1]; e.g. [1, 6, 4, 5]).
+    bars defaults to len(degrees). root and scale default to the Set's scale (see set_scale); without Live, give both.
+    octave 1 puts A at MIDI 45. The track needs an instrument (e.g. a bass synth), or the clip plays silent.
+    Destination: track + slot writes a clip into Live and replaces any clip in that slot (one undo_last restores it);
+    file_name instead writes a 120 BPM .mid file to ~/Music/ableton-mcp/midi/ and works with Live closed. Never creates tracks. 4/4 only."""
+    try:
+        overview, _ = _live_target(track, slot, file_name)
+        root, scale = _key(root, scale, overview)
+        notes, length, summary = theory.bass_notes(root, scale, pattern, [1] if degrees is None else degrees, bars, octave)
+    except (ValueError, LiveUnavailable, LiveTimeout, LiveError) as e:
+        return _error(str(e))
+    return _write_generated(notes, length, name or "bass", summary, track, slot, file_name)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def create_chord_progression(
+    degrees: list[int],
+    root: str | None = None,
+    scale: ScaleName | None = None,
+    beats_per_chord: float = 4.0,
+    sevenths: bool = False,
+    octave: int = 3,
+    track: int | None = None,
+    slot: int | None = None,
+    file_name: str | None = None,
+    name: str | None = None,
+) -> CallToolResult:
+    """Write held root-position chords built from scale degrees, e.g. [1, 6, 4, 5] in C Major gives C Am F G.
+    The result's chords names each chord. Needs a 7-note scale (not the pentatonics or Minor Blues).
+    root and scale default to the Set's scale (see set_scale); without Live, give both. The track needs an instrument.
+    Destination: track + slot writes a clip into Live and replaces any clip in that slot (one undo_last restores it);
+    file_name instead writes a 120 BPM .mid file to ~/Music/ableton-mcp/midi/ and works with Live closed. Never creates tracks. 4/4 only."""
+    try:
+        overview, _ = _live_target(track, slot, file_name)
+        root, scale = _key(root, scale, overview)
+        notes, length, summary = theory.chord_notes(root, scale, degrees, beats_per_chord, sevenths, octave)
+    except (ValueError, LiveUnavailable, LiveTimeout, LiveError) as e:
+        return _error(str(e))
+    return _write_generated(notes, length, name or " ".join(summary["chords"]), summary, track, slot, file_name)
 
 
 @mcp.tool(annotations=READ_ONLY)

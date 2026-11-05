@@ -245,3 +245,14 @@ def test_delete_track_one_undo_pair(env):
     (out,) = read_responses(bridge, sock, 1)
     assert out["ok"] and len(song.tracks) == 1
     assert song.undo_log == ["begin", "end"]
+
+
+def test_write_clip_occupied_slot_one_undo_pair(env):
+    bridge, song, sock, conn = env
+    song.create_midi_track(-1)
+    song.tracks[0].clip_slots[0].create_clip(4.0)
+    notes = [{"pitch": 36, "start_time": 0, "duration": 0.25}]
+    sock.sendall(line(req(conn["token"], "write_clip", {"track": 0, "slot": 0, "length_beats": 8, "notes": notes})))
+    (out,) = read_responses(bridge, sock, 1)
+    assert out["ok"] and song.tracks[0].clip_slots[0].clip.length == 8.0
+    assert song.undo_log == ["begin", "end"]

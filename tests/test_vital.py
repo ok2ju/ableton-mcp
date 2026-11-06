@@ -133,6 +133,7 @@ def test_read_preset_skips_empty_slots_and_uses_file_name(tmp_path):
     assert got["controls"] == {"polyphony": 4}
     assert got["modulations"] == [{"source": "velocity", "destination": "filter_1_cutoff", "amount": 0.3}]
     assert got["wavetables"] == []
+    assert got["sample"] == ""
 
 
 @pytest.mark.parametrize("content", [b"not json", b"[]", b'{"synth_version": "1.5.5"}', b"\xff\xfe"])
@@ -194,3 +195,46 @@ def test_launch_os_error_means_not_loaded(monkeypatch, tmp_path):
         raise PermissionError("not executable")
     monkeypatch.setattr(vital.subprocess, "Popen", popen)
     assert vital.launch(tmp_path / "Pad.vital") is False
+
+
+def test_comb_and_formant_filter_controls():
+    controls = {"filter_1_keytrack": 1, "filter_1_formant_x": 0.2, "filter_1_formant_y": 0.8,
+                "filter_2_blend_transpose": 84}
+    s = vital.build_preset("x", controls, [], [], "1.5.5")["settings"]
+    assert {k: s[k] for k in controls} == controls
+    with pytest.raises(ValueError, match="0–84"):
+        vital.build_preset("x", {"filter_1_blend_transpose": 85}, [], [], "1.5.5")
+    route = {"source": "lfo_1", "destination": "filter_1_keytrack", "amount": 0.5}
+    vital.build_preset("x", {}, [route], [], "1.5.5")
+
+
+def test_white_noise_sample():
+    s = vital.build_preset("x", {"sample_on": 1, "sample_destination": 0}, [], [], "1.5.5", "white_noise")["settings"]
+    assert s["sample"]["name"] == "White Noise"
+    assert s["sample"]["length"] == 44100
+    data = base64.b64decode(s["sample"]["samples"])
+    assert len(data) == 88200
+    assert any(data)
+    again = vital.build_preset("x", {"sample_on": 1}, [], [], "1.5.5", "white_noise")["settings"]
+    assert again["sample"]["samples"] == s["sample"]["samples"]
+
+
+def test_sample_errors():
+    with pytest.raises(ValueError, match="white_noise"):
+        vital.build_preset("x", {"sample_on": 1}, [], [], "1.5.5")
+    with pytest.raises(ValueError, match="unknown sample"):
+        vital.build_preset("x", {}, [], [], "1.5.5", "pink")
+    with pytest.raises(ValueError, match="needs sample_on 1"):
+        vital.build_preset("x", {}, [], [], "1.5.5", "white_noise")
+
+
+def test_sample_modulation_routes():
+    ok = {"source": "env_2", "destination": "sample_level", "amount": 1}
+    vital.build_preset("x", {}, [ok], [], "1.5.5")
+    with pytest.raises(ValueError, match="cannot modulate"):
+        vital.build_preset("x", {}, [{**ok, "destination": "sample_loop"}], [], "1.5.5")
+
+
+def test_read_preset_sample_name(tmp_path):
+    vital.write_preset("Pluck", vital.build_preset("Pluck", {"sample_on": 1}, [], [], "1.5.5", "white_noise"), tmp_path)
+    assert vital.read_preset("Pluck", tmp_path)["sample"] == "White Noise"

@@ -194,7 +194,7 @@ Every control is a `ValueDetails` entry: name, min, max, default, value scale, u
 
 ### 5.1 The simplest approach that works
 
-Implemented as `src/ableton_mcp/vital.py` plus the `vital_create_preset` and `vital_read_preset` tools. Differences from this section: only saw, square, triangle and sine waves, about 80 accepted controls (the `CONTROLS` table in `vital.py`), and `open=false` for Vital inside Live. User-facing limits are in the README's Limits section.
+Implemented as `src/ableton_mcp/vital.py` plus the `vital_create_preset` and `vital_read_preset` tools. Differences from this section: only saw, square, triangle and sine waves, 94 accepted controls (the `CONTROLS` table in `vital.py`, including comb/formant filter controls and the sample source), a `sample` argument (`"silence"` or seeded `"white_noise"`, generated in code, no factory data), and `open=false` for Vital inside Live. Comb/formant meanings come from the 1.0.6 source and are checked by hand on 1.5.5 (README smoke step 30); the formant "The Mouth" style is left undescribed because the open-source VocalTract is a pass-through. User-facing limits are in the README's Limits section.
 
 Use architecture (a), and reuse (b) only for what this repo already does:
 

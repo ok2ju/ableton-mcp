@@ -9,6 +9,8 @@ import base64
 import difflib
 import json
 import math
+import random
+import struct
 import subprocess
 from pathlib import Path
 
@@ -34,12 +36,25 @@ for _n in (1, 2, 3):
 for _n in (1, 2):
     CONTROLS |= {
         f"filter_{_n}_on": (0, 1, "0 off (default), 1 on"),
-        f"filter_{_n}_cutoff": (8, 136, "MIDI note number; Hz = 440 * 2**((value - 69) / 12); default 60"),
-        f"filter_{_n}_resonance": (0, 1, "default 0.5"),
+        f"filter_{_n}_cutoff": (8, 136, "MIDI note number; Hz = 440 * 2**((value - 69) / 12); default 60; "
+                                        "for comb: the pitch it rings at"),
+        f"filter_{_n}_resonance": (0, 1, "default 0.5; for comb: feedback, 0.99 rings long"),
         f"filter_{_n}_drive": (0, 20, "dB; default 0"),
-        f"filter_{_n}_blend": (0, 2, "0 low-pass, 1 band-pass, 2 high-pass (analog, dirty, ladder, digital models)"),
+        f"filter_{_n}_blend": (0, 2, "analog/dirty/ladder/digital/diode: 0 low-pass, 1 band-pass, 2 high-pass; "
+                                     "comb low-high styles: 0 low only, 1 both, 2 high only; "
+                                     "comb band-spread styles: band width, 0 narrow, 2 wide; formant: unused"),
         f"filter_{_n}_model": (0, 7, "0 analog, 1 dirty, 2 ladder, 3 digital, 4 diode, 5 formant, 6 comb, 7 phaser"),
-        f"filter_{_n}_style": (0, 9, "for analog/dirty/ladder/digital: 0 12dB, 1 24dB slope"),
+        f"filter_{_n}_style": (0, 9, "analog/dirty/ladder/digital: 0 12dB, 1 24dB, 2 notch blend, 3 notch spread, "
+                                     "4 B/P/N; diode: 0 low shelf, 1 low cut; formant: 0 AOIE, 1 AIUO vowels; "
+                                     "comb: 0 low-high comb, 1 low-high flange+, 2 low-high flange-, "
+                                     "3 band-spread comb, 4 band-spread flange+, 5 band-spread flange-; "
+                                     "phaser: 0 positive, 1 negative"),
+        f"filter_{_n}_keytrack": (-1, 1, "how far the cutoff follows the played note; 1 full (a comb pluck needs 1 "
+                                         "so each note rings at its own pitch); default 0"),
+        f"filter_{_n}_blend_transpose": (0, 84, "comb only: semitones above the cutoff for the damping filter "
+                                                "(low-high) or band centre (band spread); default 42"),
+        f"filter_{_n}_formant_x": (0, 1, "formant only: vowel position, 0 left, 1 right; default 0.5 (corners: see filter_N_formant_y)"),
+        f"filter_{_n}_formant_y": (0, 1, "formant only: vowel position, 0 bottom, 1 top; default 0.5. Corners (x, y): AOIE style: (0,0) ah, (1,0) ee, (0,1) oo, (1,1) oh; AIUO style: (0,0) ah, (1,0) oh, (0,1) ee, (1,1) eh"),
     }
 for _n in (1, 2, 3):
     CONTROLS |= {
@@ -57,6 +72,13 @@ for _n in (1, 2):
                                    "6 1/1, 7 1/2, 8 1/4, 9 1/8, 10 1/16, 11 1/32, 12 1/64; default 7"),
     }
 CONTROLS |= {
+    "sample_on": (0, 1, "0 off (default), 1 on; needs sample='white_noise'"),
+    "sample_level": (0, 1, "amplitude = value**2; default 0.707"),
+    "sample_destination": (0, 4, "0 filter 1, 1 filter 2, 2 both filters, 3 effects (default), 4 direct out"),
+    "sample_transpose": (-48, 48, "semitones, whole numbers; default 0"),
+    "sample_keytrack": (0, 1, "0 off (default): same speed on every note, 1 on: follows the played note"),
+    "sample_loop": (0, 1, "0 play once, 1 loop (default)"),
+    "sample_random_phase": (0, 1, "0 off (default), 1 start each note at a random point"),
     "chorus_on": (0, 1, "0 off (default), 1 on"),
     "chorus_dry_wet": (0, 1, "mix; default 0.5"),
     "delay_on": (0, 1, "0 off (default), 1 on"),
@@ -91,7 +113,8 @@ MOD_SOURCES = frozenset(
 MAX_MODULATIONS = 64
 # Switches and selectors: Vital drops a route to them. ponytail: inferred from the user's presets, which never
 # route to these (a sweep of ~/Music/Vital); check synth_parameters.cpp if a new control needs it.
-NOT_MODULATABLE_SUFFIXES = ("_on", "_model", "_style", "_sync", "_destination", "distortion_type", "polyphony")
+NOT_MODULATABLE_SUFFIXES = ("_on", "_model", "_style", "_sync", "_destination", "distortion_type", "polyphony",
+                            "sample_keytrack", "sample_loop", "sample_random_phase")
 
 
 def _line(name: str, points: list[float]) -> dict:
@@ -111,6 +134,18 @@ _TRIANGLE_LFO = _line("Triangle", [0.0, 1.0, 0.5, 0.0, 1.0, 1.0])
 _SILENT_SAMPLE = {  # 64 int16 zeros
     "name": "Silence", "length": 64, "sample_rate": 44100, "samples": base64.b64encode(bytes(128)).decode(),
 }
+
+
+
+def _white_noise() -> dict:
+    """1 s of seeded white noise at half scale, so every preset carries the same bytes."""
+    rng = random.Random(0)
+    n = 44100
+    data = struct.pack(f"<{n}h", *(rng.randint(-16384, 16383) for _ in range(n)))  # little-endian int16
+    return {"name": "White Noise", "length": n, "sample_rate": 44100, "samples": base64.b64encode(data).decode()}
+
+
+SAMPLES: dict[str, dict] = {"silence": _SILENT_SAMPLE, "white_noise": _white_noise()}
 
 DEFAULT_VERSION = "1.5.5"
 VITAL_BINARY = Path("/Applications/Vital.app/Contents/MacOS/Vital")
@@ -138,9 +173,17 @@ def _check_control(name: str, value) -> float:
     return value
 
 
-def build_preset(name: str, controls: dict, modulations: list[dict], waves: list[str], version: str) -> dict:
-    """Return preset JSON. modulations: [{source, destination, amount -1..1}]. waves: up to 3 WAVES keys."""
+def build_preset(name: str, controls: dict, modulations: list[dict], waves: list[str], version: str,
+                 sample: str = "silence") -> dict:
+    """Return preset JSON. modulations: [{source, destination, amount -1..1}]. waves: up to 3 WAVES keys.
+    sample: a SAMPLES key, the audio the sample source plays."""
     settings = {k: _check_control(k, v) for k, v in controls.items()}
+    if sample not in SAMPLES:
+        raise ValueError(f"unknown sample {sample!r}; use one of {', '.join(SAMPLES)}")
+    if settings.get("sample_on") and sample == "silence":
+        raise ValueError("sample_on needs sample='white_noise'; the default sample is silent")
+    if not settings.get("sample_on") and sample != "silence":
+        raise ValueError(f"sample={sample!r} needs sample_on 1, else the sample is never heard")
     if len(modulations) > MAX_MODULATIONS:
         raise ValueError(f"at most {MAX_MODULATIONS} modulations")
     routes = []
@@ -166,7 +209,7 @@ def build_preset(name: str, controls: dict, modulations: list[dict], waves: list
         "modulations": routes,
         "wavetables": [WAVES[w] for w in waves],
         "lfos": [_TRIANGLE_LFO] * 8,
-        "sample": _SILENT_SAMPLE,
+        "sample": SAMPLES[sample],
     }
     return {
         "synth_version": version, "preset_name": name, "author": "ableton-mcp", "comments": "",
@@ -192,7 +235,7 @@ def write_preset(name: str, preset: dict, directory: Path) -> Path:
 def read_preset(name_or_path: str, directory: Path) -> dict:
     """Summarise a preset: a bare name (with or without .vital) means <directory>/<name>.vital; anything with '/' is a path.
 
-    Returns the CONTROLS keys the file holds, its non-empty modulation routes and its wavetable names.
+    Returns the CONTROLS keys the file holds, its non-empty modulation routes, its wavetable names and sample name.
     Wavetable and sample data are never returned (factory files are about 1.6 MB).
     """
     if "/" in name_or_path:
@@ -212,6 +255,7 @@ def read_preset(name_or_path: str, directory: Path) -> dict:
     if not isinstance(settings, dict):
         raise ValueError(f"{path.name} is not a Vital preset")
     routes = settings.get("modulations") or []
+    sample = settings.get("sample")
     return {
         "name": data.get("preset_name") or path.stem,  # factory files leave preset_name out
         "author": data.get("author", ""),
@@ -224,6 +268,7 @@ def read_preset(name_or_path: str, directory: Path) -> dict:
             if isinstance(r, dict) and r.get("source") and r.get("destination")
         ],
         "wavetables": [w.get("name", "") if isinstance(w, dict) else "" for w in settings.get("wavetables") or []],
+        "sample": sample.get("name", "") if isinstance(sample, dict) else "",
     }
 
 

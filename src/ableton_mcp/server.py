@@ -70,6 +70,7 @@ class Modulation:
 
 
 WaveName = Literal[tuple(vital.WAVES)]
+SampleName = Literal[tuple(vital.SAMPLES)]
 
 
 @dataclass
@@ -553,6 +554,7 @@ def vital_create_preset(
     controls: dict[str, float],
     modulations: list[Modulation] | None = None,
     waves: list[WaveName] | None = None,
+    sample: SampleName = "silence",
     open: bool = True,
 ) -> CallToolResult:
     """Build a Vital synth preset from scratch and save it to Vital's User presets folder (works without Live).
@@ -561,20 +563,31 @@ def vital_create_preset(
     - osc_N_unison_voices 1..16; osc_N_unison_detune 0..10 (detune % = value**2, default 4.47 = 20%); osc_N_unison_blend 0..1
     - osc_N_destination 0 filter 1, 1 filter 2, 2 both, 3 effects, 4 direct out (defaults: osc 1 -> 0, osc 2 -> 1, osc 3 -> 3)
     - filter_N_on 0/1 (off by default); filter_N_cutoff 8..136 (MIDI note: 60 = 262 Hz, 76 = 659 Hz, 96 = 2.1 kHz); filter_N_resonance 0..1; filter_N_drive 0..20 dB
-    - filter_N_blend 0 low-pass, 1 band-pass, 2 high-pass; filter_N_model 0 analog, 1 dirty, 2 ladder, 3 digital, 4 diode, 5 formant, 6 comb, 7 phaser; filter_N_style 0 12dB, 1 24dB
+    - filter_N_model 0 analog, 1 dirty, 2 ladder, 3 digital, 4 diode, 5 formant, 6 comb, 7 phaser; filter_N_keytrack -1..1 (1 = cutoff follows the played note)
+    - analog/dirty/ladder/digital: filter_N_style 0 12dB, 1 24dB, 2 notch blend, 3 notch spread, 4 B/P/N; filter_N_blend 0 low-pass, 1 band-pass, 2 high-pass (diode too; diode style 0 low shelf, 1 low cut)
+    - formant: filter_N_style 0 AOIE, 1 AIUO vowels; filter_N_formant_x (0 left, 1 right), filter_N_formant_y (0 bottom, 1 top) pick the vowel (default 0.5); blend unused.
+      Corners (x, y): AOIE (0,0) ah, (1,0) ee, (0,1) oo, (1,1) oh; AIUO (0,0) ah, (1,0) oh, (0,1) ee, (1,1) eh. "ah" to "ee": AOIE, y 0, route an LFO to formant_x from x 0.
+    - comb: filter_N_cutoff = the pitch it rings at, filter_N_resonance = feedback (0.99 rings long); filter_N_style 0 low-high comb, 1/2 low-high flange+/-, 3 band-spread comb, 4/5 band-spread flange+/-;
+      filter_N_blend low-high: 0 low only, 1 both, 2 high only; band spread: 0 narrow, 2 wide; filter_N_blend_transpose 0..84 semitones above cutoff (damping filter or band centre, default 42)
+    - phaser: filter_N_style 0 positive, 1 negative
     - env_N_attack / env_N_decay / env_N_release 0..2.378 (seconds = value**4: 0.5 = 0.06 s, 1 = 1 s, 1.3 = 2.9 s); env_N_sustain 0..1. env 1 is the amp envelope.
     - lfo_N_sync 0 seconds, 1 tempo (default); lfo_N_frequency -7..9 (Hz = 2**value, sync 0 only); lfo_N_tempo 0..12 (7 = 1/2, 8 = 1/4, 9 = 1/8)
+    - sample_on 0/1 (needs sample="white_noise"); sample_level 0..1 (default 0.707); sample_destination 0..4 like osc (default 3 effects, so it skips the filters);
+      sample_transpose -48..48; sample_keytrack, sample_loop (default 1), sample_random_phase 0/1
     - chorus_on, delay_on, reverb_on, distortion_on 0/1 (all off by default); chorus_dry_wet, delay_dry_wet, reverb_dry_wet 0..1
     - delay_feedback -1..1; delay_tempo 4..12 (8 = 1/4, 9 = 1/8); reverb_size 0..1; reverb_decay_time -6..6 (seconds = 2**value)
     - distortion_type 0..5 (soft clip, hard clip, linear fold, sine fold, bit crush, down sample); distortion_drive -30..30 dB; distortion_mix 0..1
     - macro_control_1..4 0..1; volume 0..7399 (dB = sqrt(value) - 80, default 5473 = -6 dB); polyphony 1..32
     modulations: up to 64 routes. Sources: lfo_1..8, env_1..6, random_1..4, macro_control_1..4, velocity, note, note_in_octave, aftertouch, slide, lift, mod_wheel, pitch_wheel, random, stereo.
-    Destinations: any control above except switches and selectors (_on, _model, _style, _sync, _destination, distortion_type, polyphony). waves: one of saw, square, triangle, sine per oscillator 1-3 (missing ones are saw).
+    Destinations: any control above except switches and selectors (_on, _model, _style, _sync, _destination, distortion_type, polyphony, sample_keytrack, sample_loop, sample_random_phase). waves: one of saw, square, triangle, sine per oscillator 1-3 (missing ones are saw).
+    sample: the audio the sample source plays, "silence" (default) or "white_noise" (needs sample_on 1).
+    Plucked string recipe: osc_1_on 0; sample="white_noise", sample_on 1, sample_level 0, sample_destination 0; route env_2 -> sample_level amount 1 with env_2_attack 0, env_2_decay 0.5, env_2_sustain 0;
+    filter_1_on 1, filter_1_model 6, filter_1_style 3, filter_1_keytrack 1, filter_1_resonance 0.99, filter_1_cutoff 60, filter_1_blend 1.
     open: start the Vital standalone with the preset if it is closed. Pass false when the user plays Vital inside Live.
     If the preset is not loaded, tell the user the how_to_load text. name: letters, digits, space, '_' or '-'; never overwrites."""
     version, data_dir = vital.config()
     try:
-        preset = vital.build_preset(name, controls, [asdict(m) for m in modulations or []], waves or [], version)
+        preset = vital.build_preset(name, controls, [asdict(m) for m in modulations or []], waves or [], version, sample)
         path = vital.write_preset(name, preset, data_dir / "User" / "Presets")
     except ValueError as e:
         return _error(str(e))
@@ -592,7 +605,7 @@ def vital_create_preset(
 
 @mcp.tool(annotations=READ_ONLY)
 def vital_read_preset(name_or_path: str) -> CallToolResult:
-    """Read a Vital preset: its controls (only those vital_create_preset knows), modulation routes and wavetable names.
+    """Read a Vital preset: its controls (only those vital_create_preset knows), modulation routes, wavetable names and sample name.
     name_or_path: a preset name in Vital's User presets folder, or a full path to any .vital file (e.g. a factory preset).
     Use it to start from an existing sound ("make this one darker"): copy the values into vital_create_preset under a new name."""
     _, data_dir = vital.config()

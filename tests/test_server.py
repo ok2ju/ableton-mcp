@@ -710,3 +710,15 @@ def test_vital_read_preset_os_error_is_error(vital_dir):
     result = call_tool("vital_read_preset", {"name_or_path": "x"})
     assert result.is_error is True
     assert "Could not read the preset" in result.content[0].text
+
+
+def test_vital_create_preset_white_noise_sample(vital_dir):
+    presets, _ = vital_dir
+    args = {"name": "Pluck", "controls": {"sample_on": 1}, "sample": "white_noise"}
+    assert call_tool("vital_create_preset", args).is_error is False
+    s = json.loads((presets / "Pluck.vital").read_text())["settings"]
+    assert s["sample"]["name"] == "White Noise"
+
+    with pytest.raises(ToolError, match="pink"):  # schema refusal, sent to the client as isError
+        call_tool("vital_create_preset", {**args, "name": "Pink", "sample": "pink"})
+    assert not (presets / "Pink.vital").exists()

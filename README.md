@@ -78,8 +78,8 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `stop` | Stop playback | no |
 | `undo_last` | Undo the last change | no |
 | `write_midi_file` | Write a `.mid` to `~/Music/ableton-mcp/midi/` without Live | no |
-| `vital_create_preset` | Build a Vital synth preset (controls, modulation routes, saw/square/triangle/sine waves) in `~/Music/Vital/User/Presets/` without Live; opens the Vital app with it if the app is closed | no |
-| `vital_read_preset` | Controls, routes and wavetable names of a `.vital` preset, by name or path | yes |
+| `vital_create_preset` | Build a Vital synth preset (controls, modulation routes, saw/square/triangle/sine waves, a silent or white-noise sample) in `~/Music/Vital/User/Presets/` without Live; opens the Vital app with it if the app is closed | no |
+| `vital_read_preset` | Controls, routes, wavetable names and sample name of a `.vital` preset, by name or path | yes |
 
 If Live or the Remote Script is not reachable, or the script reports an error, the tool returns an `isError` result with the reason.
 
@@ -128,7 +128,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - Device parameters are raw values between `min` and `max`, not units. Read `display` (Live's own text) after a set and adjust. `display_value` (Live 12.2+) is not used. A parameter with `enabled: false` is controlled by a macro or locked; `set_device_parameters` refuses it.
 - Some Core Library rack presets (e.g. "Basic Analog Bass", "808 Drifter") hide their chains: Live shows only the macros and the LOM reports `chains: []`. Use the macros. Racks with visible chains (e.g. "Ahlimba Kit") can be read inside with `device_path` [0, chain, device].
 - A `.mid` from `write_midi_file` holds notes only. Drop it on a track with an instrument, or it plays silent. It never overwrites an existing file; reuse of a name returns an error.
-- Vital presets are files: Vital has no remote control, so the agent cannot tweak a sound live or hear it. `vital_create_preset` opens the Vital standalone with the preset only when Vital is closed (a second launch would start a second instance). If Vital is open, or runs inside Live, pick the preset in Vital's preset browser under User. Vital's `--render` crashes on 1.5.5, so there is no offline preview. Presets never overwrite an existing file. Waves are saw, square, triangle and sine only; about 80 common controls are accepted, and unknown names are refused.
+- Vital presets are files: Vital has no remote control, so the agent cannot tweak a sound live or hear it. `vital_create_preset` opens the Vital standalone with the preset only when Vital is closed (a second launch would start a second instance). If Vital is open, or runs inside Live, pick the preset in Vital's preset browser under User. Vital's `--render` crashes on 1.5.5, so there is no offline preview. Presets never overwrite an existing file. Waves are saw, square, triangle and sine only. The sample source plays silence or 1 s of white noise (a loop you may hear as a repeat on long notes); no audio files. 94 common controls are accepted, including the comb and formant filter controls, and unknown names are refused.
 - `load_from_library` with an instrument replaces the track's current instrument. `undo_last` restores it.
 - Generators are 4/4 only and refuse a Set in another signature. Their `.mid` files are always 4/4 at 120 BPM.
 - Scales: Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Locrian, Harmonic Minor, Melodic Minor, Major Pentatonic, Minor Pentatonic, Minor Blues. Any other name is refused before Live is called. `create_chord_progression` needs a 7-note scale.
@@ -168,6 +168,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 27. `/ableton:lesson-first-beat` builds a playing beat step by step, explains the drum roles and tempo, links the Beats chapter, and ends with one Cmd+S reminder and the next lesson's command. `/ableton:explain-my-set` makes no write tool call.
 28. In a fresh session with no lesson, "add an open hi-hat on the off-beats" gets a plain-words summary of the change and one save reminder at the end, not one after each tool call.
 29. With the Vital app closed, ask Claude Code for "a warm detuned supersaw pad". Vital opens with the new preset, and its values match the tool call. With Vital open, the same request starts no second instance, and the preset is in the browser under User. In Live, Vital loaded with `load_from_library` plays the preset with notes from `create_chord_progression`.
+30. With the Vital app closed, ask for "a plucked string from a noise burst". The sample panel shows White Noise on, filter 1 shows a comb style, and C3 and C4 ring at different pitches and decay like a pluck. Then ask for "a vowel 'ah' to 'ee' formant pad": filter 1 shows Formant with AOIE or AIUO, and moving the vowel pad in Vital changes the vowel from where the tool set it.
 
 ## Development
 

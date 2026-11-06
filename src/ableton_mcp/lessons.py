@@ -25,6 +25,7 @@ This server drives the user's open Ableton Live Set in Session View. Assume the 
 - Live Lite allows 8 tracks and 16 scenes (see limits in `live_status`): reuse empty ones before you create more.
 - Each change is one undo step. When the user dislikes a result, offer `undo_last`.
 - Prefer the one-call tools when they fit: `create_drum_pattern`, `create_bassline`, `create_chord_progression`, `load_instrument`, `set_scale`. Use `write_notes` for anything they cannot do.
+- For a synth sound the user describes ("a warm pad"), build a Vital preset with `vital_create_preset`; it needs no Live. If the Vital app is closed, the tool opens it with the preset; otherwise pass on its how_to_load text (pick the preset in Vital's browser under User). When the user plays Vital inside Live, load Vital on the track with `load_from_library` (plugins root) and pass `open=false`.
 - Live cannot be saved from here. When you finish a task that changed the Set, end with one short reminder to press Cmd+S (Ctrl+S on Windows). Do not remind after each tool call, and do not remind when nothing changed.
 
 Guided lessons, in order (MCP prompts the user starts from the / menu): lesson-first-beat, lesson-notes-and-scales, lesson-chords, lesson-bassline, lesson-melody, lesson-song-structure. explain-my-set describes the Set without changing it.

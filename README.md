@@ -1,13 +1,14 @@
 # ableton-mcp
 
-MCP server that lets an MCP client (Claude Code) drive Ableton Live 12.1+ (Lite included) through a stdlib-only Remote Script, plus an offline `.mid` writer that works with Live closed.
+MCP server that lets an MCP client (Claude Code) drive Ableton Live 12.1+ (Lite included) through a stdlib-only Remote Script. It also builds and reads presets for the free [Vital](https://vital.audio/) synth, and has an offline `.mid` writer. Both work with Live closed.
 
-Tested on Live 12.1.10 Lite (embedded Python 3.11.6), macOS. Session View only.
+Tested on Live 12.1.10 Lite (embedded Python 3.11.6) and Vital 1.5.5, macOS. Session View only.
 
 ## How it works
 
 - `remote_script/AbletonMCP/`: Live loads this as a Control Surface. It listens on `127.0.0.1` on a random port. It writes `{port, token}` to `~/.ableton-mcp/connection.json` (mode 0600) and removes the file when Live quits. On each Live timer tick (~100 ms) it handles up to 64 pending JSON-lines requests on Live's main thread. Each change is one undo step. A request that arrives after its deadline is refused, so a timed-out write never lands late.
 - `src/ableton_mcp/`: the MCP server (stdio). It reads `connection.json` on every call and never retries a request.
+- `src/ableton_mcp/vital.py`: Vital has no remote control, so the Vital tools write `.vital` preset files (plain JSON) to `~/Music/Vital/User/Presets/`, where Vital's browser finds them. If the Vital app is closed, the tool starts it with the new preset. Inside Live, load Vital on a track and pick the preset in its browser. Format notes: `docs/vital-mcp-research.md`.
 
 ## Install
 
@@ -46,7 +47,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 27 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 29 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -77,6 +78,8 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `stop` | Stop playback | no |
 | `undo_last` | Undo the last change | no |
 | `write_midi_file` | Write a `.mid` to `~/Music/ableton-mcp/midi/` without Live | no |
+| `vital_create_preset` | Build a Vital synth preset (controls, modulation routes, saw/square/triangle/sine waves) in `~/Music/Vital/User/Presets/` without Live; opens the Vital app with it if the app is closed | no |
+| `vital_read_preset` | Controls, routes and wavetable names of a `.vital` preset, by name or path | yes |
 
 If Live or the Remote Script is not reachable, or the script reports an error, the tool returns an `isError` result with the reason.
 
@@ -125,6 +128,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - Device parameters are raw values between `min` and `max`, not units. Read `display` (Live's own text) after a set and adjust. `display_value` (Live 12.2+) is not used. A parameter with `enabled: false` is controlled by a macro or locked; `set_device_parameters` refuses it.
 - Some Core Library rack presets (e.g. "Basic Analog Bass", "808 Drifter") hide their chains: Live shows only the macros and the LOM reports `chains: []`. Use the macros. Racks with visible chains (e.g. "Ahlimba Kit") can be read inside with `device_path` [0, chain, device].
 - A `.mid` from `write_midi_file` holds notes only. Drop it on a track with an instrument, or it plays silent. It never overwrites an existing file; reuse of a name returns an error.
+- Vital presets are files: Vital has no remote control, so the agent cannot tweak a sound live or hear it. `vital_create_preset` opens the Vital standalone with the preset only when Vital is closed (a second launch would start a second instance). If Vital is open, or runs inside Live, pick the preset in Vital's preset browser under User. Vital's `--render` crashes on 1.5.5, so there is no offline preview. Presets never overwrite an existing file. Waves are saw, square, triangle and sine only; about 80 common controls are accepted, and unknown names are refused.
 - `load_from_library` with an instrument replaces the track's current instrument. `undo_last` restores it.
 - Generators are 4/4 only and refuse a Set in another signature. Their `.mid` files are always 4/4 at 120 BPM.
 - Scales: Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Locrian, Harmonic Minor, Melodic Minor, Major Pentatonic, Minor Pentatonic, Minor Blues. Any other name is refused before Live is called. `create_chord_progression` needs a 7-note scale.
@@ -163,6 +167,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 26. In Claude Code, after `/mcp` reconnect: typing `/lesson` lists the six `/ableton:lesson-*` commands, `/ableton:explain-my-set` is there, and typing `@ableton:` offers both `live://` resources.
 27. `/ableton:lesson-first-beat` builds a playing beat step by step, explains the drum roles and tempo, links the Beats chapter, and ends with one Cmd+S reminder and the next lesson's command. `/ableton:explain-my-set` makes no write tool call.
 28. In a fresh session with no lesson, "add an open hi-hat on the off-beats" gets a plain-words summary of the change and one save reminder at the end, not one after each tool call.
+29. With the Vital app closed, ask Claude Code for "a warm detuned supersaw pad". Vital opens with the new preset, and its values match the tool call. With Vital open, the same request starts no second instance, and the preset is in the browser under User. In Live, Vital loaded with `load_from_library` plays the preset with notes from `create_chord_progression`.
 
 ## Development
 

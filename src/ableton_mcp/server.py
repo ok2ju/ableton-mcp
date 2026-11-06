@@ -1,4 +1,5 @@
-"""MCP stdio server: 27 tools that drive Ableton Live through the AbletonMCP Remote Script.
+"""MCP stdio server: 29 tools. 27 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+Vital synth presets as files (vital.py) and work without Live.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
@@ -15,7 +16,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from . import lessons, midifile, theory
+from . import lessons, midifile, theory, vital
 from .live_client import INSTALL_HINT, PROTOCOL_VERSION, LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
@@ -59,6 +60,16 @@ INSTRUMENTS = {
 # Kinds Live Lite lacks -> the Lite kind to use instead. Refused before calling Live (non-Lite devices block saving).
 NOT_IN_LITE = {"operator": "drift", "wavetable": "drift", "analog": "drift", "meld": "drift", "sampler": "simpler"}
 InstrumentKind = Literal[tuple(INSTRUMENTS)]
+
+
+@dataclass
+class Modulation:
+    source: str  # lfo_1-8, env_1-6, random_1-4, macro_control_1-4, velocity, note, aftertouch, mod_wheel, ...
+    destination: str  # a control name from vital_create_preset, e.g. filter_1_cutoff
+    amount: float  # -1..1, a share of the destination's whole range
+
+
+WaveName = Literal[tuple(vital.WAVES)]
 
 
 @dataclass
@@ -534,6 +545,63 @@ def write_midi_file(name: str, notes: list[Note], bpm: float = 120.0) -> CallToo
     except OSError as e:  # e.g. no permission or disk full; without this the SDK hides the reason
         return _error(f"Could not write the MIDI file: {e}")
     return _ok({"path": str(path), "note_count": len(notes)})
+
+
+@mcp.tool(annotations=WRITES)
+def vital_create_preset(
+    name: str,
+    controls: dict[str, float],
+    modulations: list[Modulation] | None = None,
+    waves: list[WaveName] | None = None,
+    open: bool = True,
+) -> CallToolResult:
+    """Build a Vital synth preset from scratch and save it to Vital's User presets folder (works without Live).
+    controls: engine values, not 0..1. Any control left out stays at Vital's default. N = osc 1-3, filter 1-2, env 1-3, lfo 1-2.
+    - osc_N_on 0/1 (only osc 1 on by default); osc_N_transpose -48..48 semitones; osc_N_tune -1..1; osc_N_level 0..1 (default 0.707); osc_N_pan -1..1
+    - osc_N_unison_voices 1..16; osc_N_unison_detune 0..10 (detune % = value**2, default 4.47 = 20%); osc_N_unison_blend 0..1
+    - osc_N_destination 0 filter 1, 1 filter 2, 2 both, 3 effects, 4 direct out (defaults: osc 1 -> 0, osc 2 -> 1, osc 3 -> 3)
+    - filter_N_on 0/1 (off by default); filter_N_cutoff 8..136 (MIDI note: 60 = 262 Hz, 76 = 659 Hz, 96 = 2.1 kHz); filter_N_resonance 0..1; filter_N_drive 0..20 dB
+    - filter_N_blend 0 low-pass, 1 band-pass, 2 high-pass; filter_N_model 0 analog, 1 dirty, 2 ladder, 3 digital, 4 diode, 5 formant, 6 comb, 7 phaser; filter_N_style 0 12dB, 1 24dB
+    - env_N_attack / env_N_decay / env_N_release 0..2.378 (seconds = value**4: 0.5 = 0.06 s, 1 = 1 s, 1.3 = 2.9 s); env_N_sustain 0..1. env 1 is the amp envelope.
+    - lfo_N_sync 0 seconds, 1 tempo (default); lfo_N_frequency -7..9 (Hz = 2**value, sync 0 only); lfo_N_tempo 0..12 (7 = 1/2, 8 = 1/4, 9 = 1/8)
+    - chorus_on, delay_on, reverb_on, distortion_on 0/1 (all off by default); chorus_dry_wet, delay_dry_wet, reverb_dry_wet 0..1
+    - delay_feedback -1..1; delay_tempo 4..12 (8 = 1/4, 9 = 1/8); reverb_size 0..1; reverb_decay_time -6..6 (seconds = 2**value)
+    - distortion_type 0..5 (soft clip, hard clip, linear fold, sine fold, bit crush, down sample); distortion_drive -30..30 dB; distortion_mix 0..1
+    - macro_control_1..4 0..1; volume 0..7399 (dB = sqrt(value) - 80, default 5473 = -6 dB); polyphony 1..32
+    modulations: up to 64 routes. Sources: lfo_1..8, env_1..6, random_1..4, macro_control_1..4, velocity, note, note_in_octave, aftertouch, slide, lift, mod_wheel, pitch_wheel, random, stereo.
+    Destinations: any control above except switches and selectors (_on, _model, _style, _sync, _destination, distortion_type, polyphony). waves: one of saw, square, triangle, sine per oscillator 1-3 (missing ones are saw).
+    open: start the Vital standalone with the preset if it is closed. Pass false when the user plays Vital inside Live.
+    If the preset is not loaded, tell the user the how_to_load text. name: letters, digits, space, '_' or '-'; never overwrites."""
+    version, data_dir = vital.config()
+    try:
+        preset = vital.build_preset(name, controls, [asdict(m) for m in modulations or []], waves or [], version)
+        path = vital.write_preset(name, preset, data_dir / "User" / "Presets")
+    except ValueError as e:
+        return _error(str(e))
+    except OSError as e:
+        return _error(f"Could not write the preset: {e}")
+    loaded = open and vital.launch(path)
+    if loaded:
+        how = ""
+    elif vital.VITAL_BINARY.exists():
+        how = f"In Vital (standalone or plug-in), open the preset browser and pick User > {name}."
+    else:
+        how = f"Vital standalone not found. In the Vital plug-in, open the preset browser and pick User > {name}."
+    return _ok({"path": str(path), "preset_name": name, "loaded": loaded, "how_to_load": how})
+
+
+@mcp.tool(annotations=READ_ONLY)
+def vital_read_preset(name_or_path: str) -> CallToolResult:
+    """Read a Vital preset: its controls (only those vital_create_preset knows), modulation routes and wavetable names.
+    name_or_path: a preset name in Vital's User presets folder, or a full path to any .vital file (e.g. a factory preset).
+    Use it to start from an existing sound ("make this one darker"): copy the values into vital_create_preset under a new name."""
+    _, data_dir = vital.config()
+    try:
+        return _ok(vital.read_preset(name_or_path, data_dir / "User" / "Presets"))
+    except ValueError as e:
+        return _error(str(e))
+    except OSError as e:
+        return _error(f"Could not read the preset: {e}")
 
 
 

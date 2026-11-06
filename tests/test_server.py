@@ -5,7 +5,7 @@ import re
 import pytest
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 
-from ableton_mcp import lessons, midifile, server, theory
+from ableton_mcp import lessons, midifile, server, theory, vital
 from ableton_mcp.live_client import CONTROL_SURFACE_HINT, LiveError, LiveUnavailable
 from AbletonMCP import ops
 
@@ -37,8 +37,12 @@ TOOL_NAMES = [
     "stop",
     "undo_last",
     "write_midi_file",
+    "vital_create_preset",
+    "vital_read_preset",
 ]
-READ_ONLY_TOOLS = {"live_status", "get_set_overview", "read_notes", "browse_library", "read_device"}
+READ_ONLY_TOOLS = {
+    "live_status", "get_set_overview", "read_notes", "browse_library", "read_device", "vital_read_preset",
+}
 DESTRUCTIVE_TOOLS = {
     "write_notes", "delete_track", "delete_clip",
     "create_drum_pattern", "create_bassline", "create_chord_progression",
@@ -614,3 +618,95 @@ def test_instructions_fit_claude_code_limit():
     text = server.mcp.instructions
     assert len(text) < 4096
     assert "Cmd+S" in text and "lesson-first-beat" in text
+
+
+@pytest.fixture
+def vital_dir(monkeypatch, tmp_path):
+    """Point the Vital tools at a tmp data directory, with the standalone installed and closed."""
+    monkeypatch.setattr(vital, "config", lambda: ("1.5.5", tmp_path))
+    monkeypatch.setattr(vital, "VITAL_BINARY", tmp_path)  # exists
+    launched = []
+    monkeypatch.setattr(vital, "launch", lambda path: launched.append(path) or True)
+    monkeypatch.setattr(server, "client", FakeClient())  # no Live calls
+    return tmp_path / "User" / "Presets", launched
+
+
+def test_vital_create_preset_writes_and_launches(vital_dir):
+    presets, launched = vital_dir
+    args = {
+        "name": "Warm Pad",
+        "controls": {"osc_1_unison_voices": 7, "filter_1_on": 1, "filter_1_cutoff": 76},
+        "modulations": [{"source": "lfo_1", "destination": "filter_1_cutoff", "amount": 0.1}],
+        "waves": ["saw", "sine"],
+    }
+    result = call_tool("vital_create_preset", args)
+
+    assert result.is_error is False
+    out = result.structured_content
+    assert out == {"path": str(presets / "Warm Pad.vital"), "preset_name": "Warm Pad", "loaded": True, "how_to_load": ""}
+    assert launched == [presets / "Warm Pad.vital"]
+    s = json.loads((presets / "Warm Pad.vital").read_text())["settings"]
+    assert s["filter_1_cutoff"] == 76
+    assert s["modulations"] == [{"source": "lfo_1", "destination": "filter_1_cutoff"}]
+    assert s["modulation_1_amount"] == 0.1
+    assert [w["name"] for w in s["wavetables"]] == ["Saw", "Sine", "Saw"]
+
+
+def test_vital_create_preset_open_false_gives_how_to_load(vital_dir):
+    presets, launched = vital_dir
+    result = call_tool("vital_create_preset", {"name": "Pad", "controls": {}, "open": False})
+
+    assert result.is_error is False
+    assert result.structured_content["loaded"] is False
+    assert "User > Pad" in result.structured_content["how_to_load"]
+    assert launched == []
+
+
+def test_vital_create_preset_errors(vital_dir):
+    presets, _ = vital_dir
+    bad = call_tool("vital_create_preset", {"name": "Pad", "controls": {"osc_1_unison_voice": 7}})
+    assert bad.is_error is True
+    assert "osc_1_unison_voices" in bad.content[0].text
+    assert not presets.exists()
+
+    assert call_tool("vital_create_preset", {"name": "Pad", "controls": {}}).is_error is False
+    again = call_tool("vital_create_preset", {"name": "Pad", "controls": {}})
+    assert again.is_error is True
+    assert "already exists" in again.content[0].text
+
+
+def test_vital_create_preset_lists_waves_in_schema():
+    tool = next(t for t in asyncio.run(server.mcp.list_tools()) if t.name == "vital_create_preset")
+    assert "sine" in json.dumps(tool.input_schema)
+
+
+def test_vital_read_preset(vital_dir):
+    presets, _ = vital_dir
+    call_tool("vital_create_preset", {"name": "Pad", "controls": {"polyphony": 4}})
+
+    result = call_tool("vital_read_preset", {"name_or_path": "Pad"})
+    assert result.is_error is False
+    assert result.structured_content["controls"] == {"polyphony": 4}
+
+    (presets / "junk.vital").write_text("nope")
+    junk = call_tool("vital_read_preset", {"name_or_path": "junk"})
+    assert junk.is_error is True
+    assert "not a Vital preset" in junk.content[0].text
+
+
+def test_vital_create_preset_without_standalone(vital_dir, monkeypatch, tmp_path):
+    monkeypatch.setattr(vital, "VITAL_BINARY", tmp_path / "missing")
+    monkeypatch.setattr(vital, "launch", lambda path: False)
+    result = call_tool("vital_create_preset", {"name": "Pad", "controls": {}})
+
+    assert result.structured_content["loaded"] is False
+    assert result.structured_content["how_to_load"].startswith("Vital standalone not found")
+
+
+def test_vital_read_preset_os_error_is_error(vital_dir):
+    presets, _ = vital_dir
+    (presets / "x.vital").mkdir(parents=True)  # a directory: read_bytes raises IsADirectoryError
+
+    result = call_tool("vital_read_preset", {"name_or_path": "x"})
+    assert result.is_error is True
+    assert "Could not read the preset" in result.content[0].text

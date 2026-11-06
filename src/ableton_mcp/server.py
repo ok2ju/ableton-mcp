@@ -2,6 +2,8 @@
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
+Server instructions (sent once per session), 7 guided-lesson prompts and 2 read-only resources
+(live://capabilities, live://set/overview) are registered below; their texts live in lessons.py.
 Tests replace the module global `client` with a fake.
 """
 
@@ -10,9 +12,10 @@ from dataclasses import asdict, dataclass
 from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from . import midifile, theory
+from . import lessons, midifile, theory
 from .live_client import LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
@@ -21,7 +24,7 @@ PROTOCOL_VERSION = 5  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERS
 INSTALL_HINT = "Run `uv run ableton-mcp install-script` and restart Live."
 
 client = LiveClient()
-mcp = MCPServer("ableton-mcp")
+mcp = MCPServer("ableton-mcp", instructions=lessons.INSTRUCTIONS)
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 WRITES = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
@@ -92,14 +95,20 @@ def _call(op: str, args: dict | None = None) -> CallToolResult:
 
 @mcp.tool(annotations=READ_ONLY)
 def live_status() -> CallToolResult:
-    """Check that Live is reachable. Returns the Live version, edition ("Lite", "Standard", "Suite") and supported features. Call this first."""
+    """Check that Live is reachable. Returns the Live version, edition ("Lite", "Standard", "Suite") and supported features. Call this first.
+    limits gives the edition's caps: audio_midi_tracks and scenes (null = no cap)."""
     result = _call("hello")
     if result.is_error:
         return result
-    installed = result.structured_content.get("protocol_version")
+    hello = result.structured_content
+    installed = hello.get("protocol_version")
     if installed != PROTOCOL_VERSION:
         return _error(f"Installed Remote Script speaks protocol {installed}, this server needs {PROTOCOL_VERSION}. {INSTALL_HINT}")
-    return result
+    lite = hello.get("variant") == "Lite"
+    return _ok({**hello, "limits": {
+        "audio_midi_tracks": LITE_TRACK_LIMIT if lite else None,
+        "scenes": LITE_SCENE_LIMIT if lite else None,
+    }})
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -109,6 +118,25 @@ def get_set_overview() -> CallToolResult:
     Each track's mix is {volume_db, pan, mute, solo, sends}: dB values with null = -inf, pan -50..50 (50L..50R),
     sends keyed by return letter ("A", "B"...). scenes lists {index, name}; return_tracks lists {send, name, devices}."""
     return _call("get_overview")
+
+
+def _resource_text(result: CallToolResult) -> str:
+    # ResourceError keeps the message (Control Surface or install hint); any other exception loses it.
+    if result.is_error:
+        raise ResourceError(result.content[0].text)
+    return result.content[0].text
+
+
+@mcp.resource("live://capabilities", name="capabilities", mime_type="application/json",
+              description="Same as the live_status tool: Live version, edition, features and limits.")
+def capabilities_resource() -> str:
+    return _resource_text(live_status())
+
+
+@mcp.resource("live://set/overview", name="set-overview", mime_type="application/json",
+              description="Same as the get_set_overview tool: tempo, key, tracks, devices, clips, scenes and mix.")
+def set_overview_resource() -> str:
+    return _resource_text(get_set_overview())
 
 
 def _hello_and_overview() -> tuple[dict, dict]:
@@ -508,6 +536,51 @@ def write_midi_file(name: str, notes: list[Note], bpm: float = 120.0) -> CallToo
     except OSError as e:  # e.g. no permission or disk full; without this the SDK hides the reason
         return _error(f"Could not write the MIDI file: {e}")
     return _ok({"path": str(path), "note_count": len(notes)})
+
+
+
+# Guided lessons as MCP prompts, registered in Learning Music's chapter order (list_prompts keeps it).
+# Claude Code shows them as /ableton:<name>. No arguments: the lesson asks the user instead.
+@mcp.prompt(name="lesson-first-beat", title="Lesson 1 of 6: your first beat")
+def lesson_first_beat() -> str:
+    """Build a one-bar drum loop step by step: kick, snare, hi-hats and tempo."""
+    return lessons.FIRST_BEAT
+
+
+@mcp.prompt(name="lesson-notes-and-scales", title="Lesson 2 of 6: notes and scales")
+def lesson_notes_and_scales() -> str:
+    """Hear what a scale is, compare major and minor, and pick a key for the song."""
+    return lessons.NOTES_AND_SCALES
+
+
+@mcp.prompt(name="lesson-chords", title="Lesson 3 of 6: chords")
+def lesson_chords() -> str:
+    """Build a four-chord progression in the song's key."""
+    return lessons.CHORDS
+
+
+@mcp.prompt(name="lesson-bassline", title="Lesson 4 of 6: a bassline")
+def lesson_bassline() -> str:
+    """Write a bassline that follows the chords and locks with the drums."""
+    return lessons.BASSLINE
+
+
+@mcp.prompt(name="lesson-melody", title="Lesson 5 of 6: a melody")
+def lesson_melody() -> str:
+    """Write a short melody in the key that fits over the chords."""
+    return lessons.MELODY
+
+
+@mcp.prompt(name="lesson-song-structure", title="Lesson 6 of 6: song structure")
+def lesson_song_structure() -> str:
+    """Turn the loops into song sections (scenes) and play them in order."""
+    return lessons.SONG_STRUCTURE
+
+
+@mcp.prompt(name="explain-my-set", title="Explain my Set")
+def explain_my_set() -> str:
+    """Describe the open Set in plain words (tempo, key, each track's role) without changing it."""
+    return lessons.EXPLAIN_MY_SET
 
 
 def main():

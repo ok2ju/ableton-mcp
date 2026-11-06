@@ -1,10 +1,11 @@
 import asyncio
 import json
+import re
 
 import pytest
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 
-from ableton_mcp import midifile, server, theory
+from ableton_mcp import lessons, midifile, server, theory
 from ableton_mcp.live_client import CONTROL_SURFACE_HINT, LiveError, LiveUnavailable
 from AbletonMCP import ops
 
@@ -88,13 +89,47 @@ def test_live_status_old_script_is_error(monkeypatch):
     assert "protocol 1" in result.content[0].text and "install-script" in result.content[0].text
 
 
-def test_live_status_current_script_ok(monkeypatch):
-    hello = {"protocol_version": server.PROTOCOL_VERSION, "variant": "Lite"}
+def read_resource(uri):
+    (content,) = asyncio.run(server.mcp.read_resource(uri))
+    return content
+
+
+@pytest.mark.parametrize("variant, tracks, scenes", [("Lite", 8, 16), ("Suite", None, None)])
+def test_live_status_and_capabilities_give_limits(monkeypatch, variant, tracks, scenes):
+    hello = {"protocol_version": server.PROTOCOL_VERSION, "version": "12.1.10", "variant": variant}
     monkeypatch.setattr(server, "client", FakeClient({"hello": hello}))
+    expected = {**hello, "limits": {"audio_midi_tracks": tracks, "scenes": scenes}}
 
     result = call_tool("live_status")
+    resource = read_resource("live://capabilities")
 
-    assert result.is_error is False and result.structured_content == hello
+    assert result.is_error is False and result.structured_content == expected
+    assert resource.mime_type == "application/json" and json.loads(resource.content) == expected
+
+
+def test_resources_list():
+    resources = asyncio.run(server.mcp.list_resources())
+    assert {str(r.uri): r.mime_type for r in resources} == {
+        "live://capabilities": "application/json",
+        "live://set/overview": "application/json",
+    }
+
+
+def test_set_overview_resource(monkeypatch):
+    overview = {"tempo": 120.0, "tracks": []}
+    monkeypatch.setattr(server, "client", FakeClient({"get_overview": overview}))
+
+    assert json.loads(read_resource("live://set/overview").content) == overview
+
+
+def test_resources_keep_error_hints(monkeypatch):
+    monkeypatch.setattr(server, "client", FakeClient(error=LiveUnavailable(CONTROL_SURFACE_HINT)))
+    with pytest.raises(ResourceError, match="Control Surface"):
+        read_resource("live://set/overview")
+
+    monkeypatch.setattr(server, "client", FakeClient({"hello": {"protocol_version": 1, "variant": "Lite"}}))
+    with pytest.raises(ResourceError, match="install-script"):
+        read_resource("live://capabilities")
 
 
 def test_unknown_op_gets_install_hint(monkeypatch):
@@ -522,3 +557,60 @@ def test_device_tools_pass_through(monkeypatch):
         ("get_device", {"track": 2, "device_path": [0]}),
         ("set_parameters", {"track": 2, "device_path": [0, 1, 0], "values": {"Filter Freq": 0.5, "Shape": "Saw"}}),
     ]
+
+
+PROMPT_NAMES = [
+    "lesson-first-beat",
+    "lesson-notes-and-scales",
+    "lesson-chords",
+    "lesson-bassline",
+    "lesson-melody",
+    "lesson-song-structure",
+    "explain-my-set",
+]
+
+
+def prompt_text(name):
+    (message,) = asyncio.run(server.mcp.get_prompt(name)).messages
+    return message.content.text
+
+
+def test_prompts_list_is_fixed_in_lesson_order():
+    first = asyncio.run(server.mcp.list_prompts())
+    second = asyncio.run(server.mcp.list_prompts())
+    assert [p.name for p in first] == PROMPT_NAMES
+    assert [p.name for p in second] == PROMPT_NAMES
+    for p in first:
+        assert p.description
+        assert not any(a.required for a in p.arguments or [])
+
+
+def test_lessons_link_chapter_save_and_next():
+    lesson_names = PROMPT_NAMES[:6]
+    for name, url in zip(lesson_names, lessons.CHAPTER.values(), strict=True):
+        text = prompt_text(name)
+        assert url.startswith("https://learningmusic.ableton.com/") and url in text, name
+        assert "Cmd+S" in text, name
+    for name, next_name in zip(lesson_names[:5], lesson_names[1:]):
+        assert next_name in prompt_text(name), name
+
+
+def test_explain_my_set_names_no_write_tool():
+    text = prompt_text("explain-my-set")
+    for forbidden in ("write_notes", "create_midi_track", "delete_"):
+        assert forbidden not in text
+    named = set(re.findall(r"`([a-z]+(?:_[a-z]+)+)`", text))
+    assert named and named <= READ_ONLY_TOOLS, named - READ_ONLY_TOOLS
+
+
+def test_texts_name_only_real_tools():
+    tools = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    texts = [server.mcp.instructions] + [prompt_text(n) for n in PROMPT_NAMES]
+    named = {m for t in texts for m in re.findall(r"`([a-z]+(?:_[a-z]+)+)`", t)}
+    assert named and named <= tools, named - tools
+
+
+def test_instructions_fit_claude_code_limit():
+    text = server.mcp.instructions
+    assert len(text) < 4096
+    assert "Cmd+S" in text and "lesson-first-beat" in text

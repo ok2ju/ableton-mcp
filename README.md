@@ -42,7 +42,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
-| `live_status` | Live version, edition, features; error if the installed Remote Script is out of date | yes |
+| `live_status` | Live version, edition, features, edition `limits` (`audio_midi_tracks`, `scenes`; `null` = no cap); error if the installed Remote Script is out of date | yes |
 | `get_set_overview` | Tempo, tracks, devices, Drum Rack pads (`drum_pads`), clip slots, each track's `mix`, `scenes`, `return_tracks` | yes |
 | `create_midi_track` | Add a MIDI track (refused in Lite once 8 audio+MIDI tracks exist) | no |
 | `create_midi_clip` | Empty MIDI clip in a slot (length in beats) | no |
@@ -73,6 +73,31 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 If Live or the Remote Script is not reachable, or the script reports an error, the tool returns an `isError` result with the reason.
 
 Tools that delete tracks or clips, replace a clip's notes, or write a generated clip (`create_drum_pattern`, `create_bassline`, `create_chord_progression` replace any clip in the target slot) carry `destructive_hint: true`, so the client can ask before it runs them. Every other write tool carries `destructive_hint: false`.
+
+## Lessons and resources
+
+The server also sends instructions to the agent once per session (`src/ableton_mcp/lessons.py`). They tell it to check Live before changing anything, explain each change in plain words, reuse tracks under Lite's limits, offer `undo_last`, and remind you once to press Cmd+S at the end of a task that changed the Set.
+
+Guided lessons are MCP prompts. In Claude Code, type `/` and pick one. They take no arguments: the lesson asks you instead.
+
+| Command | What you build |
+|---------|----------------|
+| `/ableton:lesson-first-beat` | A one-bar drum loop: kick, snare, hi-hats, tempo |
+| `/ableton:lesson-notes-and-scales` | Hear a scale, compare major and minor, pick a key |
+| `/ableton:lesson-chords` | A four-chord progression in your key |
+| `/ableton:lesson-bassline` | A bassline that follows the chords |
+| `/ableton:lesson-melody` | A short melody over the chords |
+| `/ableton:lesson-song-structure` | Song sections as scenes, played in order |
+| `/ableton:explain-my-set` | A plain-words tour of your Set; changes nothing |
+
+The lessons follow the chapter order of Ableton's [Learning Music](https://learningmusic.ableton.com) and link each chapter for hands-on practice. The site states no licence, so the lesson texts are our own words and only link to it.
+
+Two read-only resources return the same JSON as their tools. Attach one to a message with `@`:
+
+- `@ableton:live://capabilities`: same as `live_status`.
+- `@ableton:live://set/overview`: same as `get_set_overview`.
+
+The `ableton:` prefix is the name the server was registered under (`claude mcp add ableton ...` in Install). Under another name, the commands and mentions use that name instead.
 
 ## Limits
 
@@ -126,6 +151,10 @@ Tools that delete tracks or clips, replace a clip's notes, or write a generated 
 22. In Claude Code, "put a Drift on track 5" calls `load_instrument(4, "drift")` and track 5 shows Drift. "load the Deep Bass preset on track 6" loads it with one `load_instrument` call and no `browse_library`.
 23. `set_device_parameters` on two Drift parameters: the returned `display` matches Live's UI. One `undo_last` restores both.
 24. Lite only: "use Operator for the lead" gets the refusal, and the agent loads Drift instead.
+25. `uv run python -c "import asyncio; from ableton_mcp import server; print(asyncio.run(server.mcp.read_resource('live://capabilities')))"` shows your Live version, edition and `limits` (`"audio_midi_tracks": 8` on Lite).
+26. In Claude Code, after `/mcp` reconnect: typing `/lesson` lists the six `/ableton:lesson-*` commands, `/ableton:explain-my-set` is there, and typing `@ableton:` offers both `live://` resources.
+27. `/ableton:lesson-first-beat` builds a playing beat step by step, explains the drum roles and tempo, links the Beats chapter, and ends with one Cmd+S reminder and the next lesson's command. `/ableton:explain-my-set` makes no write tool call.
+28. In a fresh session with no lesson, "add an open hi-hat on the off-beats" gets a plain-words summary of the change and one save reminder at the end, not one after each tool call.
 
 ## Development
 

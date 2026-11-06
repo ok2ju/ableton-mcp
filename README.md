@@ -38,7 +38,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 24 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 27 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -57,7 +57,10 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `create_bassline` | Bassline from scale degrees, one per bar (patterns: quarters, eighths, octaves, offbeat, arpeggio), into a slot or a `.mid` (destructive) | no |
 | `create_chord_progression` | Held root-position chords from scale degrees (optional sevenths), into a slot or a `.mid` (destructive) | no |
 | `browse_library` | List one level of Live's browser | yes |
-| `load_from_library` | Load a browser item onto a track | no |
+| `load_from_library` | Load a browser item onto a track; returns `device_index` of the first added device | no |
+| `load_instrument` | Load an instrument by kind (drift, simpler, impulse, drum_rack, ...), optionally a preset by name; refuses non-Lite kinds on Lite | no |
+| `read_device` | A device's parameters (name, raw value, min/max, Live's `display` text, switch `items`) and a rack's chains; `device_path` reaches into racks | yes |
+| `set_device_parameters` | Set several parameters of one device by name, in one undo step; all-or-nothing | no |
 | `set_track_mix` | Set a track's volume (dB), pan (-50..50), mute, solo and sends (dB, by return letter); one undo step | no |
 | `set_label` | Rename and/or colour a track, a clip (track + slot) or a scene | no |
 | `set_tempo` | Set BPM (20-999) | no |
@@ -83,7 +86,11 @@ Tools that delete tracks or clips, replace a clip's notes, or write a generated 
 - `read_notes` does not return mute or probability, so a `read_notes` + `write_notes` round trip resets them. Notes that start at or after the clip length never play; `write_notes` reports them as `notes_outside_clip`.
 - `drum_pads` comes from the first Drum Rack on the track: top level first, then one level inside other racks (many Lite kits wrap their Drum Rack in an Instrument Rack). Deeper nesting is not searched.
 - The LOM cannot save the Set. Press Cmd+S yourself.
-- Devices load only through the browser (`load_from_library`). `Track.insert_device` arrives in Live 12.3; `live_status` reports it under `features`.
+- Devices load only through the browser (`load_from_library`, `load_instrument`), so a load replaces the current instrument and is one undo step. `Track.insert_device` (Live 12.3) is not used; `live_status` reports it under `features`.
+- `load_instrument` kinds: drift, simpler, impulse, drum_rack, drum_sampler and instrument_rack are in every edition. operator, wavetable, analog and meld (use drift) and sampler (use simpler) are refused on Lite before Live is called. On Standard/Suite they load by browser name; that path is untested.
+- `load_instrument` presets: it searches the kind's browser folder and each folder one level below it (drum_rack: the `drums` root), one `browse` call per folder (14 for Drift on Lite). The first name match in browser order wins; the result returns the loaded `path`. Other presets: `browse_library` + `load_from_library`.
+- Device parameters are raw values between `min` and `max`, not units. Read `display` (Live's own text) after a set and adjust. `display_value` (Live 12.2+) is not used. A parameter with `enabled: false` is controlled by a macro or locked; `set_device_parameters` refuses it.
+- Some Core Library rack presets (e.g. "Basic Analog Bass", "808 Drifter") hide their chains: Live shows only the macros and the LOM reports `chains: []`. Use the macros. Racks with visible chains (e.g. "Ahlimba Kit") can be read inside with `device_path` [0, chain, device].
 - A `.mid` from `write_midi_file` holds notes only. Drop it on a track with an instrument, or it plays silent. It never overwrites an existing file; reuse of a name returns an error.
 - `load_from_library` with an instrument replaces the track's current instrument. `undo_last` restores it.
 - Generators are 4/4 only and refuse a Set in another signature. Their `.mid` files are always 4/4 at 120 BPM.
@@ -96,7 +103,7 @@ Tools that delete tracks or clips, replace a clip's notes, or write a generated 
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
 1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11.
-2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 4`.
+2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 5`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
 5. `undo_last` removes only the last tool's change.
@@ -115,6 +122,10 @@ Tools that delete tracks or clips, replace a clip's notes, or write a generated 
 18. `set_label` with `color="red"` on a track, a clip and a scene shows red in Live. `copy_clip` into an empty slot plays. Cmd+S still saves.
 19. Lite only: with 16 scenes, `create_scene` returns the Lite error and Live shows no dialog.
 20. In Claude Code, "turn my loop into a song with intro, verse and chorus" names the scenes, copies or varies the clips, colours them by role and fires the scenes in order.
+21. `call get_device '{"track":1,"device_path":[0]}'` on a rack preset (e.g. "Basic Analog Bass") lists its macro parameters and `chains: []` (its chains are hidden). On "Ahlimba Kit", `[0,0,0]` reaches the Drum Rack and `[0,0,1]` the Saturator. No `display` is blank.
+22. In Claude Code, "put a Drift on track 5" calls `load_instrument(4, "drift")` and track 5 shows Drift. "load the Deep Bass preset on track 6" loads it with one `load_instrument` call and no `browse_library`.
+23. `set_device_parameters` on two Drift parameters: the returned `display` matches Live's UI. One `undo_last` restores both.
+24. Lite only: "use Operator for the lead" gets the refusal, and the agent loads Drift instead.
 
 ## Development
 

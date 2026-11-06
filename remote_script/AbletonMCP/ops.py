@@ -3,12 +3,13 @@
 `Live` is imported inside functions so tests can inject a fake module via sys.modules.
 """
 
+import difflib
 import sys
 
 from .bridge import OpError
 
-SCRIPT_VERSION = "0.4.0"
-PROTOCOL_VERSION = 4
+SCRIPT_VERSION = "0.5.0"
+PROTOCOL_VERSION = 5
 
 
 def hello(song, app, args):
@@ -530,8 +531,113 @@ def load_item(song, app, args):
     before = {_device_key(d) for d in track.devices}
     song.view.selected_track = track
     app.browser.load_item(item)
-    added = [d.name for d in track.devices if _device_key(d) not in before]
-    return {"track": args["track"], "item": item.name, "devices_added": added}
+    devices = list(track.devices)
+    keys = [_device_key(d) for d in devices]
+    added = [(i, d.name) for i, (k, d) in enumerate(zip(keys, devices)) if k not in before]
+    selected = getattr(track.view, "selected_device", None)
+    if not added and selected is not None and _device_key(selected) in keys:
+        # Replacing an instrument on real Live adds no new _live_ptr (seen on 12.1.10 Lite), so the diff is empty.
+        # Live selects the device it just loaded; report that one.
+        i = keys.index(_device_key(selected))
+        added = [(i, devices[i].name)]
+    return {
+        "track": args["track"], "item": item.name, "devices_added": [name for _, name in added],
+        "device_index": added[0][0] if added else None,
+    }
+
+
+def _device(song, args):
+    """Walk device_path [device, chain, device, ...] from the track's devices into nested rack chains."""
+    track = _track(song, args)
+    path = args["device_path"]
+    if (not isinstance(path, list) or len(path) % 2 == 0
+            or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in path)):
+        raise OpError("INVALID_ARG", "device_path must be [device, chain, device, ...]: an odd number of non-negative integers")
+    devices, where = list(track.devices), "the track"
+    for n in range(0, len(path), 2):
+        if path[n] >= len(devices):
+            raise OpError("NOT_FOUND", f"no device {path[n]}; {where} has {len(devices)} devices")
+        device = devices[path[n]]
+        if n + 1 < len(path):
+            chains = list(device.chains) if getattr(device, "can_have_chains", False) else []
+            j = path[n + 1]
+            if j >= len(chains):
+                raise OpError("NOT_FOUND", f"no chain {j}; '{device.name}' has {len(chains)} chains")
+            devices, where = list(chains[j].devices), f"chain {j} of '{device.name}'"
+    return device
+
+
+def _param_info(i, p):
+    info = {
+        "index": i, "name": p.name, "value": p.value, "min": p.min, "max": p.max,
+        "display": str(p), "quantized": bool(p.is_quantized), "enabled": bool(p.is_enabled),
+    }
+    if p.is_quantized:
+        info["items"] = list(p.value_items)
+    return info
+
+
+def get_device(song, app, args):
+    device = _device(song, args)
+    chains = None
+    if getattr(device, "can_have_chains", False):
+        chains = [
+            {"index": j, "name": c.name, "devices": [{"index": k, "name": d.name} for k, d in enumerate(c.devices)]}
+            for j, c in enumerate(device.chains)
+        ]
+    return {
+        "track": args["track"], "device_path": args["device_path"], "name": device.name,
+        "class_name": device.class_name,
+        "parameters": [_param_info(i, p) for i, p in enumerate(device.parameters)],
+        "chains": chains,
+    }
+
+
+def _param_value(p, value):
+    """Check value against p and return the raw value to set. Quantized params also take a value_items name."""
+    if p.is_quantized and isinstance(value, str):
+        items = [str(v) for v in p.value_items]
+        lowered = [v.lower() for v in items]
+        if value.lower() not in lowered:
+            choices = ", ".join(items) if items else f"a whole number in {p.min}..{p.max}"
+            raise OpError("INVALID_ARG", f"'{p.name}' takes one of: {choices}")
+        return p.min + lowered.index(value.lower())
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise OpError("INVALID_ARG", f"'{p.name}' takes a number" + (" or one of its items" if p.is_quantized else ""))
+    if not p.min <= value <= p.max:
+        raise OpError("INVALID_ARG", (
+            f"'{p.name}' range is {p.min}..{p.max} ({p.str_for_value(p.min)} to {p.str_for_value(p.max)}), got {value}"
+        ))
+    if p.is_quantized and value != int(value):
+        raise OpError("INVALID_ARG", f"'{p.name}' takes a whole number")
+    return value
+
+
+def set_parameters(song, app, args):
+    device = _device(song, args)
+    values = args["values"]
+    if not isinstance(values, dict) or not values:
+        raise OpError("INVALID_ARG", "values must map parameter names to values")
+    params = list(device.parameters)
+    names = [p.name.lower() for p in params]
+    todo = []
+    for name, value in values.items():  # validate everything before setting anything
+        hits = [i for i, n in enumerate(names) if n == str(name).lower()]
+        if not hits:
+            close = difflib.get_close_matches(str(name).lower(), names, n=3)
+            hint = f"did you mean {', '.join(params[names.index(c)].name for c in close)}?" if close else "read_device lists the names"
+            raise OpError("NOT_FOUND", f"'{device.name}' has no parameter '{name}'; {hint}")
+        if len(hits) > 1:
+            raise OpError("INVALID_ARG", f"'{device.name}' has {len(hits)} parameters named '{name}'")
+        if any(i == hits[0] for i, _, _ in todo):
+            raise OpError("INVALID_ARG", f"'{name}' is given twice")
+        p = params[hits[0]]
+        if not p.is_enabled:
+            raise OpError("LIVE_STATE", f"'{p.name}' is controlled by a macro or locked")
+        todo.append((hits[0], p, _param_value(p, value)))
+    for _, p, value in todo:
+        p.value = value
+    return {"track": args["track"], "device_path": args["device_path"], "changed": [_param_info(i, p) for i, p, _ in todo]}
 
 
 # name -> (function, mutating). Mutating ops run inside one undo step.
@@ -556,6 +662,8 @@ OPS = {
     "undo": (undo, False),
     "browse": (browse, False),
     "load_item": (load_item, True),
+    "get_device": (get_device, False),
+    "set_parameters": (set_parameters, True),
     "set_mix": (set_mix, True),
     "set_label": (set_label, True),
 }

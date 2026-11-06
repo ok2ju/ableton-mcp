@@ -25,6 +25,9 @@ TOOL_NAMES = [
     "create_chord_progression",
     "browse_library",
     "load_from_library",
+    "load_instrument",
+    "read_device",
+    "set_device_parameters",
     "set_track_mix",
     "set_label",
     "set_tempo",
@@ -34,7 +37,7 @@ TOOL_NAMES = [
     "undo_last",
     "write_midi_file",
 ]
-READ_ONLY_TOOLS = {"live_status", "get_set_overview", "read_notes", "browse_library"}
+READ_ONLY_TOOLS = {"live_status", "get_set_overview", "read_notes", "browse_library", "read_device"}
 DESTRUCTIVE_TOOLS = {
     "write_notes", "delete_track", "delete_clip",
     "create_drum_pattern", "create_bassline", "create_chord_progression",
@@ -211,8 +214,8 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
     assert "Could not write the MIDI file" in result.content[0].text
 
 
-def test_protocol_version_is_4():
-    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 4
+def test_protocol_version_is_5():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 5
 
 
 PADS_808 = [
@@ -433,3 +436,89 @@ def test_set_track_mix_sends_only_given_fields(monkeypatch):
 
     assert result.is_error is False
     assert fake.calls == [("set_mix", {"track": 1, "pan": 10})]
+
+
+# (root, path) -> [(name, is_folder, is_loadable)], shaped like the real Lite browser.
+BROWSE = {
+    ("instruments", ("Drift",)): [("Bass", True, False), ("Pad", True, False)],
+    ("instruments", ("Drift", "Bass")): [("808 Drifter.adg", False, True), ("Deep Bass.adv", False, True)],
+    ("instruments", ("Drift", "Pad")): [("Warm Pad.adv", False, True)],
+    ("instruments", ("Impulse",)): [("Impulse 808.adv", False, True)],
+    ("drums", ()): [("Drum Hits", True, False), ("Drum Rack", False, True), ("808 Core Kit.adg", False, True)],
+    ("drums", ("Drum Hits",)): [("Kick 808.wav", False, True)],
+}
+
+
+class BrowseClient(FakeClient):
+    """FakeClient that answers browse from BROWSE."""
+
+    def __init__(self, variant="Lite"):
+        super().__init__({"hello": {"variant": variant},
+                          "load_item": {"track": 0, "item": "x", "devices_added": ["x"], "device_index": 0}})
+
+    def call(self, op, args=None):
+        if op != "browse":
+            return super().call(op, args)
+        self.calls.append((op, args))
+        rows = BROWSE[(args["root"], tuple(args["path"]))]
+        return {"items": [{"name": n, "is_folder": f, "is_loadable": ld} for n, f, ld in rows],
+                "truncated": args["path"] == ["Drift", "Pad"]}
+
+
+def loads(fake):
+    return [args for op, args in fake.calls if op == "load_item"]
+
+
+def test_load_instrument_lite_refuses_operator(monkeypatch):
+    lite, suite = BrowseClient("Lite"), BrowseClient("Suite")
+    monkeypatch.setattr(server, "client", lite)
+    refused = call_tool("load_instrument", {"track": 0, "kind": "operator"})
+    monkeypatch.setattr(server, "client", suite)
+    ok = call_tool("load_instrument", {"track": 0, "kind": "operator"})
+
+    assert refused.is_error is True and "drift" in refused.content[0].text
+    assert loads(lite) == []
+    assert ok.is_error is False and loads(suite) == [{"track": 0, "root": "instruments", "path": ["Operator"]}]
+
+
+def test_load_instrument_bare_device(monkeypatch):
+    fake = BrowseClient()
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("load_instrument", {"track": 0, "kind": "drift"})
+    assert result.is_error is False
+    assert fake.calls == [("hello", {}), ("load_item", {"track": 0, "root": "instruments", "path": ["Drift"]})]
+    assert result.structured_content["path"] == ["Drift"] and result.structured_content["device_index"] == 0
+
+
+@pytest.mark.parametrize("kind, preset, root, path", [
+    ("drift", "deep bass", "instruments", ["Drift", "Bass", "Deep Bass.adv"]),
+    ("impulse", "Impulse 808", "instruments", ["Impulse", "Impulse 808.adv"]),
+    ("drum_rack", "808 Core Kit", "drums", ["808 Core Kit.adg"]),
+])
+def test_load_instrument_preset(monkeypatch, kind, preset, root, path):
+    fake = BrowseClient()
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("load_instrument", {"track": 0, "kind": kind, "preset": preset})
+    assert result.is_error is False
+    assert loads(fake) == [{"track": 0, "root": root, "path": path}]
+
+
+def test_load_instrument_unknown_preset(monkeypatch):
+    fake = BrowseClient()
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("load_instrument", {"track": 0, "kind": "drift", "preset": "Nope"})
+    text = result.content[0].text
+    assert result.is_error is True and "Bass" in text and "Pad" in text and "browse_library" in text
+    assert "cut at 500" in text
+    assert loads(fake) == []
+
+
+def test_device_tools_pass_through(monkeypatch):
+    fake = FakeClient({"get_device": {}, "set_parameters": {}})
+    monkeypatch.setattr(server, "client", fake)
+    call_tool("read_device", {"track": 2})
+    call_tool("set_device_parameters", {"track": 2, "device_path": [0, 1, 0], "values": {"Filter Freq": 0.5, "Shape": "Saw"}})
+    assert fake.calls == [
+        ("get_device", {"track": 2, "device_path": [0]}),
+        ("set_parameters", {"track": 2, "device_path": [0, 1, 0], "values": {"Filter Freq": 0.5, "Shape": "Saw"}}),
+    ]

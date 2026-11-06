@@ -10,7 +10,7 @@ import pytest
 
 from AbletonMCP.bridge import Bridge, OpError
 from AbletonMCP.ops import OPS
-from fake_live import Application, Song, install_fake_live_module
+from fake_live import Application, Device, DeviceParameter, Song, install_fake_live_module
 
 REMOTE_SCRIPT = Path(__file__).resolve().parents[1] / "remote_script"
 
@@ -274,3 +274,15 @@ def test_fire_scene_no_undo_step(env):
     sock.sendall(line(req(conn["token"], "fire_scene", {"scene": 0})))
     (out,) = read_responses(bridge, sock, 1)
     assert out["ok"] and song.scenes[0].fired and song.undo_log == []
+
+
+def test_set_parameters_one_undo_pair(env):
+    bridge, song, sock, conn = env
+    song.create_midi_track(-1)
+    params = [DeviceParameter(0.5, name="Filter Freq"), DeviceParameter(0.5, name="Resonance")]
+    song.tracks[0].devices = [Device("Drift", params)]
+    args = {"track": 0, "device_path": [0], "values": {"Filter Freq": 0.2, "Resonance": 0.7}}
+    sock.sendall(line(req(conn["token"], "set_parameters", args)))
+    (out,) = read_responses(bridge, sock, 1)
+    assert out["ok"] and [p.value for p in params] == [0.2, 0.7]
+    assert song.undo_log == ["begin", "end"]

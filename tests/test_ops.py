@@ -3,7 +3,8 @@ import pytest
 from AbletonMCP import ops
 from AbletonMCP.bridge import OpError
 from fake_live import (
-    Application, Chain, Clip, Device, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, Song, Track, install_fake_live_module,
+    Application, Chain, Clip, Device, DeviceParameter, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, Song, Track,
+    install_fake_live_module,
 )
 
 
@@ -81,7 +82,26 @@ def test_load_item_returns_only_new_devices(live):
     song.tracks[0].devices = [Device("EQ Eight")]
     out = ops.load_item(song, app, {"track": 0, "root": "drums", "path": ["Kits", "808 Core Kit.adg"]})
     assert out["devices_added"] == ["808 Core Kit"]
+    assert out["device_index"] == 1
     assert song.view.selected_track is song.tracks[0]
+
+
+def test_load_item_replace_reports_selected_device(live):
+    song, app = live
+    song.create_midi_track(-1)
+    old = Device("Drift")
+    old._live_ptr = 7
+    song.tracks[0].devices = [Device("EQ Eight"), old]
+
+    def replace(item):  # real Live: the new device keeps the old _live_ptr and is selected
+        new = Device("808 Core Kit")
+        new._live_ptr = 7
+        song.tracks[0].devices = [song.tracks[0].devices[0], new]
+        song.tracks[0].view.selected_device = new
+
+    app.browser.load_item = replace
+    out = ops.load_item(song, app, {"track": 0, "root": "drums", "path": ["Kits", "808 Core Kit.adg"]})
+    assert out["devices_added"] == ["808 Core Kit"] and out["device_index"] == 1
 
 
 def test_load_item_rejects_folder(live):
@@ -428,3 +448,75 @@ def test_set_label_refusals(live):
     assert _err(ops.set_label, song, app, {"track": 0, "scene": 0, "name": "x"}).code == "INVALID_ARG"
     assert _err(ops.set_label, song, app, {"track": 0, "color": 0x1000000}).code == "INVALID_ARG"
     assert _err(ops.set_label, song, app, {"track": 0}).code == "INVALID_ARG"
+
+
+def drift():
+    return Device("Drift", class_name="Drift", parameters=[
+        DeviceParameter(1, 0, 1, "Device On", items=["Off", "On"]),
+        DeviceParameter(0.85, 0.0, 1.0, "Filter Freq"),
+        DeviceParameter(0, 0, 3, "Osc 1 Shape", items=["Sine", "Triangle", "Saw", "Square"]),
+        DeviceParameter(0.2, 0.0, 1.0, "Env Amount", enabled=False),
+    ])
+
+
+@pytest.fixture
+def drift_set(live):
+    song, app = live
+    song.create_midi_track(-1)
+    rack = InstrumentRack("Basic Analog Bass", [Chain([drift()], name="Analog")])
+    rack.class_name = "InstrumentGroupDevice"
+    song.tracks[0].devices = [drift(), rack]
+    return song, app
+
+
+def test_get_device_lists_parameters(drift_set):
+    song, app = drift_set
+    out = ops.get_device(song, app, {"track": 0, "device_path": [0]})
+    assert out["name"] == "Drift" and out["class_name"] == "Drift" and out["chains"] is None
+    assert out["parameters"][1] == {
+        "index": 1, "name": "Filter Freq", "value": 0.85, "min": 0.0, "max": 1.0,
+        "display": "0.0 dB", "quantized": False, "enabled": True,
+    }
+    assert [p.get("items") for p in out["parameters"]] == [["Off", "On"], None, ["Sine", "Triangle", "Saw", "Square"], None]
+    assert out["parameters"][3]["enabled"] is False
+
+
+def test_get_device_walks_rack_chains(drift_set):
+    song, app = drift_set
+    rack = ops.get_device(song, app, {"track": 0, "device_path": [1]})
+    assert rack["chains"] == [{"index": 0, "name": "Analog", "devices": [{"index": 0, "name": "Drift"}]}]
+    assert ops.get_device(song, app, {"track": 0, "device_path": [1, 0, 0]})["class_name"] == "Drift"
+    assert _err(ops.get_device, song, app, {"track": 0, "device_path": [5]}).code == "NOT_FOUND"
+    assert _err(ops.get_device, song, app, {"track": 0, "device_path": [1, 3, 0]}).code == "NOT_FOUND"
+    assert _err(ops.get_device, song, app, {"track": 0, "device_path": [0, 0, 0]}).code == "NOT_FOUND"  # Drift has no chains
+    for bad in ([1, 0], ["a"], [], [True], [-1]):
+        assert _err(ops.get_device, song, app, {"track": 0, "device_path": bad}).code == "INVALID_ARG", bad
+
+
+def test_set_parameters_by_name_and_item(drift_set):
+    song, app = drift_set
+    out = ops.set_parameters(song, app, {"track": 0, "device_path": [1, 0, 0], "values": {"filter freq": 0.5, "Osc 1 Shape": "saw"}})
+    params = song.tracks[0].devices[1].chains[0].devices[0].parameters
+    assert params[1].value == 0.5 and params[2].value == 2
+    assert [(c["name"], c["display"]) for c in out["changed"]] == [("Filter Freq", "-14.0 dB"), ("Osc 1 Shape", "Saw")]
+
+
+def test_set_parameters_refusals_change_nothing(drift_set):
+    song, app = drift_set
+    params = song.tracks[0].devices[0].parameters
+    args = {"track": 0, "device_path": [0]}
+    e = _err(ops.set_parameters, song, app, {**args, "values": {"Filter Freq": 0.5, "Osc 1 Shape": 7}})
+    assert e.code == "INVALID_ARG" and "0..3" in str(e) and "Sine to Square" in str(e)
+    assert params[1].value == 0.85
+    e = _err(ops.set_parameters, song, app, {**args, "values": {"Filter Freq": 1.5}})
+    assert e.code == "INVALID_ARG" and "0.0..1.0" in str(e)
+    assert _err(ops.set_parameters, song, app, {**args, "values": {"Env Amount": 0.5}}).code == "LIVE_STATE"
+    e = _err(ops.set_parameters, song, app, {**args, "values": {"Fliter Freq": 0.5}})
+    assert e.code == "NOT_FOUND" and "Filter Freq" in str(e)
+    e = _err(ops.set_parameters, song, app, {**args, "values": {"Osc 1 Shape": "Noise"}})
+    assert e.code == "INVALID_ARG" and "Sine, Triangle, Saw, Square" in str(e)
+    for bad in ({"Filter Freq": True}, {"Filter Freq": "loud"}, {"Osc 1 Shape": 1.5}, {}, {"filter freq": 0.1, "Filter Freq": 0.2}):
+        assert _err(ops.set_parameters, song, app, {**args, "values": bad}).code == "INVALID_ARG", bad
+    params.append(DeviceParameter(0.5, name="filter freq"))
+    assert _err(ops.set_parameters, song, app, {**args, "values": {"Filter Freq": 0.5}}).code == "INVALID_ARG"
+    assert [p.value for p in params] == [1, 0.85, 0, 0.2, 0.5]

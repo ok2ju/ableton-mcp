@@ -1,4 +1,4 @@
-"""MCP stdio server: 24 tools that drive Ableton Live through the AbletonMCP Remote Script.
+"""MCP stdio server: 27 tools that drive Ableton Live through the AbletonMCP Remote Script.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
@@ -17,7 +17,7 @@ from .live_client import LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
 LITE_SCENE_LIMIT = 16
-PROTOCOL_VERSION = 4  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
+PROTOCOL_VERSION = 5  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
 INSTALL_HINT = "Run `uv run ableton-mcp install-script` and restart Live."
 
 client = LiveClient()
@@ -48,6 +48,16 @@ COLORS = {
     "cyan": 0x00BFAF, "blue": 0x10A4EE, "purple": 0x886CE4, "pink": 0xFF39D4, "grey": 0x969696,
 }
 Color = Literal[tuple(COLORS)]
+
+# Instrument kind -> its name in Live's browser (instruments root).
+INSTRUMENTS = {
+    "drift": "Drift", "simpler": "Simpler", "impulse": "Impulse", "drum_rack": "Drum Rack",
+    "drum_sampler": "Drum Sampler", "instrument_rack": "Instrument Rack",
+    "operator": "Operator", "wavetable": "Wavetable", "analog": "Analog", "meld": "Meld", "sampler": "Sampler",
+}
+# Kinds Live Lite lacks -> the Lite kind to use instead. Refused before calling Live (non-Lite devices block saving).
+NOT_IN_LITE = {"operator": "drift", "wavetable": "drift", "analog": "drift", "meld": "drift", "sampler": "simpler"}
+InstrumentKind = Literal[tuple(INSTRUMENTS)]
 
 
 @dataclass
@@ -342,9 +352,87 @@ def browse_library(root: str, path: list[str] | None = None) -> CallToolResult:
 @mcp.tool(annotations=WRITES)
 def load_from_library(track: int, root: str, path: list[str]) -> CallToolResult:
     """Load a browser item onto a track, e.g. a drum kit from root "drums". path must end at an item that
-    browse_library marked is_loadable. Returns the names of the devices that were added.
-    Loading an instrument replaces the track's current instrument; undo_last restores it."""
+    browse_library marked is_loadable. Returns the names of the devices that were added and device_index,
+    the position of the first one (use [device_index] as device_path in read_device).
+    Loading an instrument replaces the track's current instrument; undo_last restores it.
+    For instruments and their presets, load_instrument does this in one call."""
     return _call("load_item", {"track": track, "root": root, "path": path})
+
+
+def _preset_key(name: str) -> str:
+    return name.lower().removesuffix(".adv").removesuffix(".adg")
+
+
+def _find_preset(root: str, start: list[str], preset: str) -> tuple[list[str] | None, list[str], bool]:
+    """Search start and each folder one level below it, in browser order.
+    Returns (path or None, folder names, whether any listing was cut at browse's item cap)."""
+    want = _preset_key(preset)
+    level = client.call("browse", {"root": root, "path": start})
+    truncated = level.get("truncated", False)
+    for item in level["items"]:
+        if item["is_loadable"] and _preset_key(item["name"]) == want:
+            return start + [item["name"]], [], truncated
+    folders = [item["name"] for item in level["items"] if item["is_folder"]]
+    for folder in folders:
+        listing = client.call("browse", {"root": root, "path": start + [folder]})
+        truncated = truncated or listing.get("truncated", False)
+        for item in listing["items"]:
+            if item["is_loadable"] and _preset_key(item["name"]) == want:
+                return start + [folder, item["name"]], folders, truncated
+    return None, folders, truncated
+
+
+@mcp.tool(annotations=WRITES)
+def load_instrument(track: int, kind: InstrumentKind, preset: str | None = None) -> CallToolResult:
+    """Put an instrument on a MIDI track, replacing its current instrument; undo_last restores it.
+    Without preset you get the bare device. preset is a preset name from the kind's browser folders, e.g. drift
+    "Deep Bass" or drum_rack "808 Core Kit" (a kit); case and the .adv/.adg ending are ignored.
+    Live Lite has drift, simpler, impulse, drum_rack, drum_sampler and instrument_rack only; other kinds are refused there.
+    Returns the added devices, device_index (for read_device) and the browser root and path that were loaded."""
+    name = INSTRUMENTS[kind]
+    try:
+        if client.call("hello", {})["variant"] == "Lite" and kind in NOT_IN_LITE:
+            return _error(f"{name} is not in Live Lite; use kind '{NOT_IN_LITE[kind]}'.")
+        root, path = "instruments", [name]
+        if preset is not None:
+            if kind == "drum_rack":  # kits live in the drums root; instruments/Drum Rack is empty
+                root, path = "drums", []
+            found, folders, truncated = _find_preset(root, path, preset)
+            if found is None:
+                where = "/".join([root, *path])
+                cut = " Some folder listings were cut at 500 items, so the preset may be past the cut." if truncated else ""
+                return _error(
+                    f"No preset '{preset}' in {where} or its folders ({', '.join(folders) or 'none'}).{cut} "
+                    f"Use browse_library('{root}', {path + ['<folder>']}) to see the names."
+                )
+            path = found
+    except (LiveUnavailable, LiveTimeout, LiveError) as e:
+        return _error(str(e))
+    result = _call("load_item", {"track": track, "root": root, "path": path})
+    if result.is_error:
+        return result
+    return _ok({**result.structured_content, "root": root, "path": path})
+
+
+@mcp.tool(annotations=READ_ONLY)
+def read_device(track: int, device_path: list[int] | None = None) -> CallToolResult:
+    """Read one device's parameters: {index, name, value, min, max, display, quantized, enabled}; switches
+    (quantized) also list their choices in items. display is Live's own text for the value, e.g. "1.20 kHz".
+    device_path defaults to [0], the track's first device (get_set_overview lists the devices). Add
+    [chain, device] to go into a rack: [0, 0, 1] is device 1 in chain 0 of rack 0. chains lists a rack's chains
+    and their devices (null when the device is not a rack). enabled false means a macro or lock controls the
+    parameter: change the macro instead."""
+    return _call("get_device", {"track": track, "device_path": device_path or [0]})
+
+
+@mcp.tool(annotations=WRITES)
+def set_device_parameters(track: int, device_path: list[int], values: dict[str, float | str]) -> CallToolResult:
+    """Change parameters of one device (device_path as in read_device), all in one undo step.
+    values maps a parameter name from read_device (case ignored) to a raw value between its min and max,
+    or, for a switch, one of its items, e.g. {"Filter Freq": 0.6, "Osc 1 Shape": "Saw"}.
+    Raw values are not units: check display in the result and set again if it is off.
+    If any entry is invalid, nothing changes. undo_last restores all of them."""
+    return _call("set_parameters", {"track": track, "device_path": device_path, "values": values})
 
 
 @mcp.tool(annotations=WRITES)

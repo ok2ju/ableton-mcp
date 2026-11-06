@@ -6,8 +6,10 @@ import types
 
 
 class Device:
-    def __init__(self, name):
+    def __init__(self, name, parameters=(), class_name=None):
         self.name = name
+        self.class_name = class_name or name
+        self.parameters = list(parameters)
 
 
 class DrumPad:
@@ -16,8 +18,9 @@ class DrumPad:
 
 
 class Chain:
-    def __init__(self, devices):
+    def __init__(self, devices, name=""):
         self.devices = list(devices)
+        self.name = name
 
 
 class InstrumentRack(Device):
@@ -48,13 +51,22 @@ class MidiNote(MidiNoteSpecification):
 
 
 class DeviceParameter:
-    """Volume/send fake: a monotonic curve with 0.85 = 0 dB, 1.0 = +6 dB, 0 = -inf. Pan uses min -1, max 1."""
+    """Continuous params display on the volume/send curve: 0.85 = 0 dB, 1.0 = +6 dB, 0 = -inf. Pan uses min -1, max 1.
+    Quantized params (items given) display their item name."""
 
-    def __init__(self, value, min=0.0, max=1.0):
-        self.value, self.min, self.max = value, min, max
+    def __init__(self, value, min=0.0, max=1.0, name="", items=None, enabled=True):
+        self.value, self.min, self.max, self.name = value, min, max, name
+        self.is_quantized = items is not None
+        self.value_items = tuple(items or ())
+        self.is_enabled = enabled
 
     def str_for_value(self, value):
+        if self.is_quantized:
+            return self.value_items[int(value)]
         return "-inf dB" if value == 0 else f"{(value - 0.85) * 40:.1f} dB"
+
+    def __str__(self):
+        return self.str_for_value(self.value)
 
 
 class MixerDevice:
@@ -131,6 +143,7 @@ class Track:
         self.color = 0
         self.mixer_device = MixerDevice()
         self.devices = []
+        self.view = types.SimpleNamespace(selected_device=None)
         self.clip_slots = [ClipSlot() for _ in range(scenes)]
 
     def create_midi_clip(self, start_time, length):  # arrangement, 12.1.10+
@@ -243,6 +256,8 @@ class Browser:
     def load_item(self, item):
         track = self._song.view.selected_track
         track.devices = track.devices + [Device(n) for n in item.devices]
+        if item.devices:
+            track.view.selected_device = track.devices[-1]
 
 
 class Application:

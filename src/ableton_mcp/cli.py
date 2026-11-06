@@ -1,4 +1,4 @@
-"""Command line: run the MCP server, install the Remote Script, or send one raw bridge call."""
+"""Command line: run the MCP server, install the Remote Script, check the setup (doctor), or send one raw bridge call."""
 
 import argparse
 import json
@@ -28,6 +28,8 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command")
     p_install = sub.add_parser("install-script", help="copy the Remote Script into Live's User Library")
     p_install.add_argument("--user-library", type=Path, default=DEFAULT_USER_LIBRARY)
+    p_doctor = sub.add_parser("doctor", help="check Live, the Remote Script, the bridge and Claude Code registration")
+    p_doctor.add_argument("--user-library", type=Path, default=None, help=f"default: {DEFAULT_USER_LIBRARY}")
     p_call = sub.add_parser("call", help="send one raw bridge request (smoke tests)")
     p_call.add_argument("op")
     p_call.add_argument("args", nargs="?", default="{}", help="JSON object")
@@ -40,6 +42,10 @@ def main(argv=None):
     elif ns.command == "install-script":
         dest = install_script(ns.user_library)
         print(f"Installed to {dest}. Restart Live, then pick AbletonMCP under Settings → Link, Tempo & MIDI → Control Surface.")
+    elif ns.command == "doctor":
+        from . import doctor
+
+        return doctor.run(ns.user_library)
     elif ns.command == "call":
         from .live_client import LiveClient, LiveError, LiveTimeout, LiveUnavailable
 

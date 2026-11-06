@@ -29,6 +29,14 @@ Register with Claude Code:
 claude mcp add ableton -- uv --directory /path/to/ableton-mcp run ableton-mcp
 ```
 
+Check the whole setup:
+
+```sh
+uv run ableton-mcp doctor    # add --user-library "/path/to/User Library" if you installed elsewhere
+```
+
+It checks the Live app version, Live's `Log.txt`, the installed script against the repo, `connection.json`, a read-only `hello` to Live, and the Claude Code registration (`claude mcp get ableton`). Each line is PASS, WARN, FAIL or SKIP, and each FAIL or WARN prints its fix. Exit code 1 means at least one FAIL.
+
 Check the bridge without an MCP client:
 
 ```sh
@@ -127,7 +135,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 ## Manual smoke checklist (real Live)
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
-1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11.
+1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11. `doctor` prints no FAIL and exits 0.
 2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 5`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
@@ -162,3 +170,9 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 uv sync
 uv run pytest -q
 ```
+
+CI (`.github/workflows/test.yml`) runs the suite on Python 3.11 (Live's embedded version) and 3.13 for every push to `main` and every pull request. Keep `src/` and `remote_script/` working on 3.11.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Some design patterns come from other MIT-licensed Live projects. They were re-implemented here, and no code was copied.

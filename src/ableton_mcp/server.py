@@ -16,12 +16,10 @@ from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from . import lessons, midifile, theory
-from .live_client import LiveClient, LiveError, LiveTimeout, LiveUnavailable
+from .live_client import INSTALL_HINT, PROTOCOL_VERSION, LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
 LITE_SCENE_LIMIT = 16
-PROTOCOL_VERSION = 5  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
-INSTALL_HINT = "Run `uv run ableton-mcp install-script` and restart Live."
 
 client = LiveClient()
 mcp = MCPServer("ableton-mcp", instructions=lessons.INSTRUCTIONS)

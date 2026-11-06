@@ -17,6 +17,9 @@ GRACE_S = 2.0  # client waits budget + grace, so it always sees the script's EXP
 CONTROL_SURFACE_HINT = (
     "Open Live and select AbletonMCP under Settings → Link, Tempo & MIDI → Control Surface"
 )
+# Here (stdlib-only) rather than in server.py, so `doctor` can use them without importing mcp.
+PROTOCOL_VERSION = 5  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
+INSTALL_HINT = "Run `uv run ableton-mcp install-script` and restart Live."
 
 
 class LiveUnavailable(Exception):

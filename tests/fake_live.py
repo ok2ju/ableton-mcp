@@ -22,6 +22,9 @@ class Chain:
         self.devices = list(devices)
         self.name = name
 
+    def delete_device(self, index):
+        self.devices = self.devices[:index] + self.devices[index + 1:]
+
 
 class InstrumentRack(Device):
     can_have_chains = True
@@ -166,6 +169,9 @@ class Track:
             self.devices = self.devices + [device]
         else:
             self.devices = self.devices[:target_index] + [device] + self.devices[target_index:]
+
+    def delete_device(self, index):
+        self.devices = self.devices[:index] + self.devices[index + 1:]
 
 
 NATIVE_DEVICES = ("Limiter", "Channel EQ", "Reverb", "Simpler")

@@ -10,7 +10,7 @@ import sys
 from .bridge import OpError
 
 SCRIPT_VERSION = "0.6.0"
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 
 
 def hello(song, app, args):
@@ -580,15 +580,15 @@ def load_item(song, app, args):
     }
 
 
-def _device(song, args):
-    """Walk device_path [device, chain, device, ...] from the track's devices into nested rack chains."""
-    track = _track(song, args)
-    path = args["device_path"]
+def _walk_devices(track, path):
+    """Walk device_path [device, chain, device, ...] from the track's devices into nested rack chains.
+    Returns (container, index, device): container is the track or chain whose devices[index] is device."""
     if (not isinstance(path, list) or len(path) % 2 == 0
             or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in path)):
         raise OpError("INVALID_ARG", "device_path must be [device, chain, device, ...]: an odd number of non-negative integers")
-    devices, where = list(track.devices), "the track"
+    container, where = track, "the track"
     for n in range(0, len(path), 2):
+        devices = list(container.devices)
         if path[n] >= len(devices):
             raise OpError("NOT_FOUND", f"no device {path[n]}; {where} has {len(devices)} devices")
         device = devices[path[n]]
@@ -597,8 +597,12 @@ def _device(song, args):
             j = path[n + 1]
             if j >= len(chains):
                 raise OpError("NOT_FOUND", f"no chain {j}; '{device.name}' has {len(chains)} chains")
-            devices, where = list(chains[j].devices), f"chain {j} of '{device.name}'"
-    return device
+            container, where = chains[j], f"chain {j} of '{device.name}'"
+    return container, path[-1], device
+
+
+def _device(song, args):
+    return _walk_devices(_track(song, args), args["device_path"])[2]
 
 
 SIMPLER_CLASS = "OriginalSimpler"
@@ -672,6 +676,21 @@ def insert_device(song, app, args):
     new = [i for i, d in enumerate(devices) if _device_key(d) not in before]
     at = new[0] if new else (len(devices) - 1 if append else index)
     return {"track": args["track"], "device": devices[at].name, "device_index": at}
+
+
+def delete_device(song, app, args):
+    """Remove the device at device_path from its track or rack chain. track "main" is the Main track."""
+    track = song.master_track if args["track"] == "main" else _track(song, args)
+    container, index, device = _walk_devices(track, args["device_path"])
+    name = device.name
+    try:
+        container.delete_device(index)
+    except Exception as e:  # one Live call; its exception type is unverified
+        raise OpError("LIVE_STATE", f"Live could not delete '{name}': {str(e).rstrip('.')}")
+    return {
+        "track": args["track"], "device_path": args["device_path"], "deleted": name,
+        "devices": [d.name for d in container.devices],
+    }
 
 
 def _param_info(i, p):
@@ -774,6 +793,7 @@ OPS = {
     "create_audio_clip": (create_audio_clip, True),
     "replace_sample": (replace_sample, True),
     "insert_device": (insert_device, True),
+    "delete_device": (delete_device, True),
     "set_mix": (set_mix, True),
     "set_label": (set_label, True),
 }

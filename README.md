@@ -73,6 +73,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `create_audio_clip` | Put a library sample (`samples` / `user_library` root + path) or an absolute `file_path` into an empty Session slot of an audio track; reports `warping` and `length_beats` (Live 12.4+) | no |
 | `replace_sample` | Swap the sample of a Simpler, by `device_path` or by Drum Rack `pad_note` (destructive, one undo step; Live 12.4+) | no |
 | `insert_device` | Add a native Live device (e.g. Limiter, Channel EQ) after the existing ones, or at `index`, without replacing the instrument; `track="main"` is the Main track (Live 12.3+) | no |
+| `delete_device` | Remove one device (effect or instrument) by `device_path`, also inside rack chains; `track="main"` is the Main track (destructive, one undo step) | no |
 | `set_track_mix` | Set a track's volume (dB), pan (-50..50), mute, solo and sends (dB, by return letter); one undo step | no |
 | `set_label` | Rename and/or colour a track, a clip (track + slot) or a scene | no |
 | `set_tempo` | Set BPM (20-999) | no |
@@ -117,7 +118,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 
 - Live Lite allows 8 audio+MIDI tracks. `create_midi_track` checks this before it calls Live; free a track with `delete_track` or reuse one.
 - Live Lite allows 16 scenes. `create_scene` checks this before it calls Live; name and reuse empty scenes with `set_label`.
-- Live Lite allows 2 return tracks (A and B). Return and Main track mixing is not supported; `set_track_mix` covers audio, MIDI and group tracks. `insert_device` is the only tool that takes `track="main"`.
+- Live Lite allows 2 return tracks (A and B). Return and Main track mixing is not supported; `set_track_mix` covers audio, MIDI and group tracks. `insert_device` and `delete_device` are the only tools that take `track="main"`.
 - Volume and send levels are in dB. In `get_set_overview`, `null` means -inf (silent). `set_track_mix` takes numbers only; to silence a track, use `mute`.
 - Solo is not exclusive: `set_track_mix(solo=true)` does not unsolo other tracks. Unsolo them yourself.
 - Colours are 10 names (red, orange, yellow, lime, green, cyan, blue, purple, pink, grey). Live snaps each to the nearest colour in its chooser.
@@ -145,7 +146,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
 1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11. `doctor` prints no FAIL and exits 0.
-2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 6`.
+2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 7`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
 5. `undo_last` removes only the last tool's change.
@@ -177,6 +178,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 31. Live 12.4+: `live_status` shows `features.audio_clip`, `insert_device` and `replace_sample` all `true`.
 32. Load the Garage Kit. `read_device` on a pad's chain (via `device_path`) shows the pad device's `class_name`: `OriginalSimpler` means `replace_sample(pad_note=...)` works on that kit.
 33. `insert_device(track="main", device_name="Limiter")` adds a Limiter on Main. One `undo_last` removes it. On Lite, `device_name="EQ Eight"` returns the native-devices hint. On a track that has an instrument, `device_name="Drift"` is refused ("Device chains cannot have more than one instrument each") and nothing changes.
+33a. `delete_device(track="main", device_path=[0])` removes that Limiter; the result lists the devices left. One `undo_last` brings it back. `device_path=[0, 0, 1]` on a rack with visible chains removes device 1 of chain 0.
 34. On an audio track, `create_audio_clip(root="samples", path=["Atmos Calm 130 bpm.wav"])` plays in time at the Set's tempo; the result shows `warping` and `length_beats`.
 35. On the Garage Kit track, `replace_sample(pad_note=36, root="samples", path=["<a Kick from browse_library samples>"])` changes the kick's sound. One `undo_last` brings the old kick back.
 

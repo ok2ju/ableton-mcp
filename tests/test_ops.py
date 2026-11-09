@@ -640,6 +640,31 @@ def test_insert_device_appends_to_track_and_main(live):
     assert ops.OPS["insert_device"][1] is True
 
 
+def test_delete_device_on_track_main_and_rack_chain(live):
+    song, app = live
+    song.create_midi_track(-1)
+    rack = InstrumentRack("Rack", [Chain([Device("Drift"), Device("Saturator")])])
+    song.tracks[0].devices = [Device("Drift"), Device("Redux"), rack]
+    assert ops.delete_device(song, app, {"track": 0, "device_path": [1]}) == {
+        "track": 0, "device_path": [1], "deleted": "Redux", "devices": ["Drift", "Rack"]}
+    out = ops.delete_device(song, app, {"track": 0, "device_path": [1, 0, 1]})
+    assert out["deleted"] == "Saturator" and out["devices"] == ["Drift"]
+    assert [d.name for d in rack.chains[0].devices] == ["Drift"]
+    song.master_track.devices = [Device("Limiter")]
+    assert ops.delete_device(song, app, {"track": "main", "device_path": [0]})["devices"] == []
+    assert ops.OPS["delete_device"][1] is True
+
+
+def test_delete_device_errors_change_nothing(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.tracks[0].devices = [Device("Drift")]
+    for path, code in (([5], "NOT_FOUND"), ([0, 0, 0], "NOT_FOUND"), ([0, 0], "INVALID_ARG"), ([True], "INVALID_ARG")):
+        assert _err(ops.delete_device, song, app, {"track": 0, "device_path": path}).code == code, path
+    assert _err(ops.delete_device, song, app, {"track": "main", "device_path": [0]}).code == "NOT_FOUND"
+    assert [d.name for d in song.tracks[0].devices] == ["Drift"]
+
+
 def test_insert_device_maps_live_error(live):
     song, app = live
     song.create_midi_track(-1)

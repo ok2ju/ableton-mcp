@@ -18,7 +18,7 @@ CONTROL_SURFACE_HINT = (
     "Open Live and select AbletonMCP under Settings → Link, Tempo & MIDI → Control Surface"
 )
 # Here (stdlib-only) rather than in server.py, so `doctor` can use them without importing mcp.
-PROTOCOL_VERSION = 6  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
+PROTOCOL_VERSION = 7  # must equal remote_script/AbletonMCP/ops.py PROTOCOL_VERSION
 INSTALL_HINT = "Run `uv run ableton-mcp install-script` and restart Live."
 
 

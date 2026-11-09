@@ -32,6 +32,7 @@ TOOL_NAMES = [
     "create_audio_clip",
     "replace_sample",
     "insert_device",
+    "delete_device",
     "set_track_mix",
     "set_label",
     "set_tempo",
@@ -47,7 +48,7 @@ READ_ONLY_TOOLS = {
     "live_status", "get_set_overview", "read_notes", "browse_library", "read_device", "vital_read_preset",
 }
 DESTRUCTIVE_TOOLS = {
-    "write_notes", "delete_track", "delete_clip", "replace_sample",
+    "write_notes", "delete_track", "delete_clip", "replace_sample", "delete_device",
     "create_drum_pattern", "create_bassline", "create_chord_progression",
 }
 
@@ -256,8 +257,8 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
     assert "Could not write the MIDI file" in result.content[0].text
 
 
-def test_protocol_version_is_6():
-    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 6
+def test_protocol_version_is_7():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 7
 
 
 PADS_808 = [
@@ -790,6 +791,16 @@ def test_insert_device_main(monkeypatch):
     result = call_tool("insert_device", {"track": "main", "device_name": "Limiter"})
     assert result.structured_content["device"] == "Limiter"
     assert fake.calls[1] == ("insert_device", {"track": "main", "device_name": "Limiter", "index": -1})
+
+
+def test_delete_device_forwards_track_and_path(monkeypatch):
+    fake = FakeClient({"delete_device": {"track": 1, "device_path": [1], "deleted": "Redux", "devices": ["Drift"]}})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("delete_device", {"track": 1, "device_path": [1]})
+    assert result.structured_content["deleted"] == "Redux"
+    assert fake.calls[0] == ("delete_device", {"track": 1, "device_path": [1]})
+    call_tool("delete_device", {"track": "main", "device_path": [0]})
+    assert fake.calls[1] == ("delete_device", {"track": "main", "device_path": [0]})
 
 
 @pytest.mark.parametrize("tool", ["create_audio_clip", "replace_sample"])

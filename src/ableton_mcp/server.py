@@ -544,6 +544,15 @@ def insert_device(track: int | Literal["main"], device_name: str, index: int = -
     return _call("insert_device", {"track": track, "device_name": device_name, "index": index})
 
 
+@mcp.tool(annotations=DESTRUCTIVE)
+def delete_device(track: int | Literal["main"], device_path: list[int]) -> CallToolResult:
+    """Remove one device (effect or instrument) from a track; one undo_last restores it.
+    device_path as in read_device: [1] is the track's second device, [0, 0, 1] is device 1 in chain 0 of rack 0.
+    track "main" is the Main track. Later devices' indices shift down by one, so read the result's devices list
+    (or get_set_overview) before the next delete."""
+    return _call("delete_device", {"track": track, "device_path": device_path})
+
+
 @mcp.tool(annotations=WRITES)
 def set_track_mix(
     track: int,

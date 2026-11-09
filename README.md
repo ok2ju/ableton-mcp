@@ -47,7 +47,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 29 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 32 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -70,6 +70,9 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `load_instrument` | Load an instrument by kind (drift, simpler, impulse, drum_rack, ...), optionally a preset by name; refuses non-Lite kinds on Lite | no |
 | `read_device` | A device's parameters (name, raw value, min/max, Live's `display` text, switch `items`) and a rack's chains; `device_path` reaches into racks | yes |
 | `set_device_parameters` | Set several parameters of one device by name, in one undo step; all-or-nothing | no |
+| `create_audio_clip` | Put a library sample (`samples` / `user_library` root + path) or an absolute `file_path` into an empty Session slot of an audio track; reports `warping` and `length_beats` (Live 12.4+) | no |
+| `replace_sample` | Swap the sample of a Simpler, by `device_path` or by Drum Rack `pad_note` (destructive, one undo step; Live 12.4+) | no |
+| `insert_device` | Add a native Live device (e.g. Limiter, Channel EQ) after the existing ones, or at `index`, without replacing the instrument; `track="main"` is the Main track (Live 12.3+) | no |
 | `set_track_mix` | Set a track's volume (dB), pan (-50..50), mute, solo and sends (dB, by return letter); one undo step | no |
 | `set_label` | Rename and/or colour a track, a clip (track + slot) or a scene | no |
 | `set_tempo` | Set BPM (20-999) | no |
@@ -114,7 +117,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 
 - Live Lite allows 8 audio+MIDI tracks. `create_midi_track` checks this before it calls Live; free a track with `delete_track` or reuse one.
 - Live Lite allows 16 scenes. `create_scene` checks this before it calls Live; name and reuse empty scenes with `set_label`.
-- Live Lite allows 2 return tracks (A and B). Return and master track mixing is not supported; `set_track_mix` covers audio, MIDI and group tracks.
+- Live Lite allows 2 return tracks (A and B). Return and Main track mixing is not supported; `set_track_mix` covers audio, MIDI and group tracks. `insert_device` is the only tool that takes `track="main"`.
 - Volume and send levels are in dB. In `get_set_overview`, `null` means -inf (silent). `set_track_mix` takes numbers only; to silence a track, use `mute`.
 - Solo is not exclusive: `set_track_mix(solo=true)` does not unsolo other tracks. Unsolo them yourself.
 - Colours are 10 names (red, orange, yellow, lime, green, cyan, blue, purple, pink, grey). Live snaps each to the nearest colour in its chooser.
@@ -122,7 +125,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - `read_notes` does not return mute or probability, so a `read_notes` + `write_notes` round trip resets them. Notes that start at or after the clip length never play; `write_notes` reports them as `notes_outside_clip`.
 - `drum_pads` comes from the first Drum Rack on the track: top level first, then one level inside other racks (many Lite kits wrap their Drum Rack in an Instrument Rack). Deeper nesting is not searched.
 - The LOM cannot save the Set. Press Cmd+S yourself.
-- Devices load only through the browser (`load_from_library`, `load_instrument`), so a load replaces the current instrument and is one undo step. `Track.insert_device` (Live 12.3) is not used; `live_status` reports it under `features`.
+- Devices load only through the browser (`load_from_library`, `load_instrument`), so a load replaces the current instrument and is one undo step. `insert_device` adds native Live devices by name without replacing anything; it refuses plug-ins, and Lite lacks some devices (e.g. EQ Eight: use Channel EQ). `live_status` `features` reports `insert_device`, `replace_sample` and `audio_clip`; the three tools refuse before calling Live when theirs is false.
 - `load_instrument` kinds: drift, simpler, impulse, drum_rack, drum_sampler and instrument_rack are in every edition. operator, wavetable, analog and meld (use drift) and sampler (use simpler) are refused on Lite before Live is called. On Standard/Suite they load by browser name; that path is untested.
 - `load_instrument` presets: it searches the kind's browser folder and each folder one level below it (drum_rack: the `drums` root), one `browse` call per folder (14 for Drift on Lite). The first name match in browser order wins; the result returns the loaded `path`. Other presets: `browse_library` + `load_from_library`.
 - Device parameters are raw values between `min` and `max`, not units. Read `display` (Live's own text) after a set and adjust. `display_value` (Live 12.2+) is not used. A parameter with `enabled: false` is controlled by a macro or locked; `set_device_parameters` refuses it.
@@ -134,13 +137,15 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - Scales: Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Locrian, Harmonic Minor, Melodic Minor, Major Pentatonic, Minor Pentatonic, Minor Blues. Any other name is refused before Live is called. `create_chord_progression` needs a 7-note scale.
 - `create_drum_pattern` picks each voice's pad by a keyword in the pad name first (e.g. "Kick", "Snare", "Hihat Closed"), then by its General MIDI note (36 kick, 38 snare, 42 closed hat, 46 open hat, ...) if no other voice claims that pad by name. Kits with odd or empty pad names can leave voices unresolved; the result lists them in `missing_voices`.
 - Generators replace the clip in the target slot as one undo step. They never create tracks or load instruments. Melodic clips need an instrument on the track, or they play silent.
+- Samples: the server finds a `samples` name by exact file name in Live's Core Library, `~/Music/Ableton/Factory Packs` and the User Library (a full folder walk per call). A name found twice is refused with the paths; pass one as `file_path`. `user_library` paths are joined onto the User Library folder. Only .wav, .aif, .aiff, .flac, .mp3 and .ogg files are taken.
+- Audio clips go into Session slots only; Arrangement placement is not supported. There is no tool to create an audio track: use one the Set has. Warping is left to Live; there is no warp mode or marker control.
 - If Live shows a modal dialog, calls time out. A timed-out change may still have run: check `get_set_overview` before retrying.
 
 ## Manual smoke checklist (real Live)
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
 1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11. `doctor` prints no FAIL and exits 0.
-2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 5`.
+2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 6`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
 5. `undo_last` removes only the last tool's change.
@@ -169,6 +174,11 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 28. In a fresh session with no lesson, "add an open hi-hat on the off-beats" gets a plain-words summary of the change and one save reminder at the end, not one after each tool call.
 29. With the Vital app closed, ask Claude Code for "a warm detuned supersaw pad". Vital opens with the new preset, and its values match the tool call. With Vital open, the same request starts no second instance, and the preset is in the browser under User. In Live, Vital loaded with `load_from_library` plays the preset with notes from `create_chord_progression`.
 30. With the Vital app closed, ask for "a plucked string from a noise burst". The sample panel shows White Noise on, filter 1 shows a comb style, and C3 and C4 ring at different pitches and decay like a pluck. Then ask for "a vowel 'ah' to 'ee' formant pad": filter 1 shows Formant with AOIE or AIUO, and moving the vowel pad in Vital changes the vowel from where the tool set it.
+31. Live 12.4+: `live_status` shows `features.audio_clip`, `insert_device` and `replace_sample` all `true`.
+32. Load the Garage Kit. `read_device` on a pad's chain (via `device_path`) shows the pad device's `class_name`: `OriginalSimpler` means `replace_sample(pad_note=...)` works on that kit.
+33. `insert_device(track="main", device_name="Limiter")` adds a Limiter on Main. One `undo_last` removes it. On Lite, `device_name="EQ Eight"` returns the native-devices hint. On a track that has an instrument, `device_name="Drift"` is refused ("Device chains cannot have more than one instrument each") and nothing changes.
+34. On an audio track, `create_audio_clip(root="samples", path=["Atmos Calm 130 bpm.wav"])` plays in time at the Set's tempo; the result shows `warping` and `length_beats`.
+35. On the Garage Kit track, `replace_sample(pad_note=36, root="samples", path=["<a Kick from browse_library samples>"])` changes the kick's sound. One `undo_last` brings the old kick back.
 
 ## Development
 

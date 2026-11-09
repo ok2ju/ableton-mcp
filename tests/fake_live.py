@@ -92,6 +92,8 @@ class Clip:
         self.color = 0
         self.length = length
         self.is_midi_clip = is_midi_clip
+        self.file_path = None  # audio clips only
+        self.warping = not is_midi_clip
         self.notes = []
         self._next_id = 1
 
@@ -120,6 +122,13 @@ class ClipSlot:
     def create_clip(self, length):
         self.clip = Clip(length)
 
+    def create_audio_clip(self, path):
+        if path.endswith("broken.wav"):  # stands in for a file Live cannot decode
+            raise RuntimeError("Could not read the audio file")
+        self.clip = Clip(8.0, is_midi_clip=False)
+        self.clip.name = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        self.clip.file_path = path
+
     def delete_clip(self):
         self.clip = None
 
@@ -131,7 +140,7 @@ class ClipSlot:
 
 
 class Track:
-    """Fake Live.Track.Track. No insert_device, like Live 12.1.10."""
+    """Fake Live.Track.Track with the 12.4 API. install_fake_live_module(version) decides what hello sees."""
 
     def __init__(self, name="1-MIDI", has_midi_input=True, scenes=8):
         self.name = name
@@ -149,9 +158,26 @@ class Track:
     def create_midi_clip(self, start_time, length):  # arrangement, 12.1.10+
         raise NotImplementedError
 
+    def insert_device(self, device_name, target_index=None):  # 12.3+, native devices only
+        if device_name not in NATIVE_DEVICES:
+            raise RuntimeError(f"Device {device_name} not available.")  # Live 12.4.16's text, ends with "."
+        device = Device(device_name)
+        if target_index is None:
+            self.devices = self.devices + [device]
+        else:
+            self.devices = self.devices[:target_index] + [device] + self.devices[target_index:]
 
-class SimplerDevice:
-    pass
+
+NATIVE_DEVICES = ("Limiter", "Channel EQ", "Reverb", "Simpler")
+
+
+class SimplerDevice(Device):
+    def __init__(self, name="Simpler", file_path=None):
+        super().__init__(name, class_name="OriginalSimpler")
+        self.file_path = file_path
+
+    def replace_sample(self, file_path):  # 12.4+
+        self.file_path = file_path
 
 
 class SongView:
@@ -179,6 +205,7 @@ class Song:
         self.tracks = []
         self.scenes = [Scene() for _ in range(8)]
         self.return_tracks = [Track("A-Reverb", has_midi_input=False, scenes=0), Track("B-Delay", has_midi_input=False, scenes=0)]
+        self.master_track = Track("Main", has_midi_input=False, scenes=0)
         self.view = SongView()
         self.undo_log = []  # "begin" / "end" markers
         self.undo_count = 0
@@ -279,11 +306,19 @@ class Application:
         return self._variant
 
 
-def install_fake_live_module():
-    """Put a fake `Live` package into sys.modules and return it."""
+class Track12_1:
+    """What hello sees of Track on Live 12.1.10: arrangement create_midi_clip, no insert_device."""
+    create_midi_clip = Track.create_midi_clip
+
+
+def install_fake_live_module(version=(12, 1, 10)):
+    """Put a fake `Live` package into sys.modules and return it. Below 12.4 the classes hello inspects
+    lack insert_device, replace_sample and create_audio_clip; the fake objects themselves always have them."""
     live = types.ModuleType("Live")
-    live.Track = types.SimpleNamespace(Track=Track)
-    live.SimplerDevice = types.SimpleNamespace(SimplerDevice=SimplerDevice)
+    modern = version >= (12, 4)
+    live.Track = types.SimpleNamespace(Track=Track if modern else Track12_1)
+    live.SimplerDevice = types.SimpleNamespace(SimplerDevice=SimplerDevice if modern else type("SimplerDevice", (), {}))
+    live.ClipSlot = types.SimpleNamespace(ClipSlot=ClipSlot if modern else type("ClipSlot", (), {}))
     live.Clip = types.SimpleNamespace(MidiNoteSpecification=MidiNoteSpecification)
     sys.modules["Live"] = live
     return live

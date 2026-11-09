@@ -29,6 +29,9 @@ TOOL_NAMES = [
     "load_instrument",
     "read_device",
     "set_device_parameters",
+    "create_audio_clip",
+    "replace_sample",
+    "insert_device",
     "set_track_mix",
     "set_label",
     "set_tempo",
@@ -44,7 +47,7 @@ READ_ONLY_TOOLS = {
     "live_status", "get_set_overview", "read_notes", "browse_library", "read_device", "vital_read_preset",
 }
 DESTRUCTIVE_TOOLS = {
-    "write_notes", "delete_track", "delete_clip",
+    "write_notes", "delete_track", "delete_clip", "replace_sample",
     "create_drum_pattern", "create_bassline", "create_chord_progression",
 }
 
@@ -253,8 +256,8 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
     assert "Could not write the MIDI file" in result.content[0].text
 
 
-def test_protocol_version_is_5():
-    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 5
+def test_protocol_version_is_6():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 6
 
 
 PADS_808 = [
@@ -722,3 +725,75 @@ def test_vital_create_preset_white_noise_sample(vital_dir):
     with pytest.raises(ToolError, match="pink"):  # schema refusal, sent to the client as isError
         call_tool("vital_create_preset", {**args, "name": "Pink", "sample": "pink"})
     assert not (presets / "Pink.vital").exists()
+
+
+HELLO_12_4 = {
+    "protocol_version": server.PROTOCOL_VERSION, "live_version": "12.4.16", "variant": "Lite",
+    "features": {"insert_device": True, "replace_sample": True, "audio_clip": True},
+}
+HELLO_12_1 = {**HELLO_12_4, "live_version": "12.1.10",
+              "features": {"insert_device": False, "replace_sample": False, "audio_clip": False}}
+SAMPLE_TOOLS = [
+    ("create_audio_clip", {"track": 0, "slot": 0}),
+    ("replace_sample", {"track": 0, "pad_note": 36}),
+    ("insert_device", {"track": "main", "device_name": "Limiter"}),
+]
+
+
+@pytest.fixture
+def wav(tmp_path):
+    path = tmp_path / "kick.wav"
+    path.write_bytes(b"RIFF")
+    return str(path)
+
+
+@pytest.mark.parametrize("tool, args", SAMPLE_TOOLS)
+def test_audio_clip_replace_sample_insert_device_refused_without_feature(monkeypatch, wav, tool, args):
+    fake = FakeClient({"hello": HELLO_12_1})
+    monkeypatch.setattr(server, "client", fake)
+    extra = {} if tool == "insert_device" else {"file_path": wav}
+    result = call_tool(tool, {**args, **extra})
+    assert result.is_error is True and "needs Live 12." in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+
+
+@pytest.mark.parametrize("tool, args", SAMPLE_TOOLS)
+def test_audio_clip_replace_sample_insert_device_old_script_gets_install_hint(monkeypatch, wav, tool, args):
+    fake = FakeClient({"hello": {**HELLO_12_4, "protocol_version": 5}})
+    monkeypatch.setattr(server, "client", fake)
+    extra = {} if tool == "insert_device" else {"file_path": wav}
+    result = call_tool(tool, {**args, **extra})
+    assert result.is_error is True and "install-script" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+
+
+def test_audio_clip_and_replace_sample_send_resolved_file(monkeypatch, wav):
+    fake = FakeClient({"hello": HELLO_12_4, "create_audio_clip": {"track": 0}, "replace_sample": {"track": 0}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("create_audio_clip", {"track": 0, "slot": 1, "file_path": wav, "name": "Kick"}).is_error is False
+    assert call_tool("replace_sample", {"track": 0, "pad_note": 36, "file_path": wav}).is_error is False
+    assert fake.calls[1] == ("create_audio_clip", {"track": 0, "slot": 1, "file_path": wav, "name": "Kick"})
+    assert fake.calls[3] == ("replace_sample", {"track": 0, "device_path": None, "pad_note": 36, "file_path": wav})
+
+
+def test_audio_clip_bad_sample_never_reaches_live(monkeypatch, tmp_path):
+    fake = FakeClient({"hello": HELLO_12_4})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("create_audio_clip", {"track": 0, "slot": 0, "file_path": str(tmp_path / "nope.wav")})
+    assert result.is_error is True and "No file" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+
+
+def test_insert_device_main(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_4, "insert_device": {"track": "main", "device": "Limiter", "device_index": 0}})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("insert_device", {"track": "main", "device_name": "Limiter"})
+    assert result.structured_content["device"] == "Limiter"
+    assert fake.calls[1] == ("insert_device", {"track": "main", "device_name": "Limiter", "index": -1})
+
+
+@pytest.mark.parametrize("tool", ["create_audio_clip", "replace_sample"])
+def test_audio_clip_replace_sample_root_schema(monkeypatch, tool):
+    monkeypatch.setattr(server, "client", FakeClient({"hello": HELLO_12_4}))
+    with pytest.raises(ToolError, match="drums|samples"):  # schema refusal, sent to the client as isError
+        call_tool(tool, {"track": 0, "slot": 0, "pad_note": 36, "root": "drums", "path": ["Kick.wav"]})

@@ -3,7 +3,8 @@ import pytest
 from AbletonMCP import ops
 from AbletonMCP.bridge import OpError
 from fake_live import (
-    Application, Chain, Clip, Device, DeviceParameter, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, Song, Track,
+    Application, Chain, Clip, Device, DeviceParameter, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, SimplerDevice,
+    Song, Track,
     install_fake_live_module,
 )
 
@@ -520,3 +521,133 @@ def test_set_parameters_refusals_change_nothing(drift_set):
     params.append(DeviceParameter(0.5, name="filter freq"))
     assert _err(ops.set_parameters, song, app, {**args, "values": {"Filter Freq": 0.5}}).code == "INVALID_ARG"
     assert [p.value for p in params] == [1, 0.85, 0, 0.2, 0.5]
+
+
+def test_hello_on_12_4_reports_sample_features():
+    install_fake_live_module((12, 4, 16))
+    song = Song()
+    out = ops.hello(song, Application(version=(12, 4, 16), song=song), {})
+    assert out["live_version"] == "12.4.16"
+    assert out["features"]["insert_device"] is True
+    assert out["features"]["replace_sample"] is True
+    assert out["features"]["audio_clip"] is True
+
+
+def test_hello_old_live_lacks_audio_clip(live):
+    song, app = live
+    assert ops.hello(song, app, {})["features"]["audio_clip"] is False
+
+
+@pytest.fixture
+def wav(tmp_path):
+    path = tmp_path / "Atmos Calm 130 bpm.wav"
+    path.write_bytes(b"RIFF")
+    return str(path)
+
+
+@pytest.fixture
+def audio_set(live):
+    song, app = live
+    song.tracks = [Track("1-Audio", has_midi_input=False), Track("2-MIDI")]
+    return song, app
+
+
+def test_create_audio_clip(audio_set, wav):
+    song, app = audio_set
+    out = ops.create_audio_clip(song, app, {"track": 0, "slot": 1, "file_path": wav, "name": "Pad"})
+    assert out == {"track": 0, "slot": 1, "name": "Pad", "file": wav, "length_beats": 8.0, "warping": True}
+    assert song.tracks[0].clip_slots[1].clip.is_midi_clip is False
+    assert ops.OPS["create_audio_clip"] == (ops.create_audio_clip, True)  # bridge wraps it in one undo step
+
+
+def test_create_audio_clip_refusals(audio_set, wav, tmp_path):
+    song, app = audio_set
+    cases = [
+        ({"track": 1, "slot": 0, "file_path": wav}, "LIVE_STATE", "audio track"),
+        ({"track": 0, "slot": 0, "file_path": str(tmp_path / "missing.wav")}, "INVALID_ARG", "no audio file"),
+        ({"track": 0, "slot": 0, "file_path": "kick.wav"}, "INVALID_ARG", "no audio file"),
+    ]
+    song.tracks[0].clip_slots[2].clip = Clip(4.0, is_midi_clip=False)
+    cases.append(({"track": 0, "slot": 2, "file_path": wav}, "LIVE_STATE", "delete_clip"))
+    broken = tmp_path / "broken.wav"
+    broken.write_bytes(b"x")
+    cases.append(({"track": 0, "slot": 0, "file_path": str(broken)}, "INVALID_ARG", "Could not read"))
+    song.tracks.append(Track("Group", has_midi_input=False))
+    song.tracks[2].is_foldable = True
+    cases.append(({"track": 2, "slot": 0, "file_path": wav}, "LIVE_STATE", "group tracks"))
+    for args, code, text in cases:
+        with pytest.raises(OpError) as e:
+            ops.create_audio_clip(song, app, args)
+        assert e.value.code == code and text in str(e.value), args
+    assert not song.tracks[0].clip_slots[0].has_clip
+
+
+@pytest.fixture
+def kit_set(live):
+    song, app = live
+    song.create_midi_track(-1)
+    kick = DrumPad(36, "Kick", [Chain([SimplerDevice("Kick", "/old/kick.wav")])])
+    snare = DrumPad(38, "Snare", [Chain([Device("Drum Sampler", class_name="DrumSampler")])])
+    rack = InstrumentRack("Garage Kit", [Chain([DrumRack("Drums", [kick, snare, DrumPad(40, "Empty")])])])
+    song.tracks[0].devices = [rack, SimplerDevice("Lead")]
+    return song, app
+
+
+def test_replace_sample_by_device_path_and_pad(kit_set, wav):
+    song, app = kit_set
+    out = ops.replace_sample(song, app, {"track": 0, "device_path": [1], "file_path": wav})
+    assert out == {"track": 0, "device_path": [1], "pad_note": None, "device": "Lead", "file": wav}
+    assert song.tracks[0].devices[1].file_path == wav
+    out = ops.replace_sample(song, app, {"track": 0, "pad_note": 36, "file_path": wav})
+    assert out["device"] == "Kick" and out["pad_note"] == 36
+    assert song.tracks[0].devices[0].chains[0].devices[0].drum_pads[0].chains[0].devices[0].file_path == wav
+    assert ops.OPS["replace_sample"][1] is True
+
+
+def test_replace_sample_refusals(kit_set, wav):
+    song, app = kit_set
+    cases = [
+        ({"device_path": [0]}, "INVALID_ARG", "'Garage Kit' is not a Simpler"),
+        ({"pad_note": 38}, "INVALID_ARG", "holds Drum Sampler"),
+        ({"pad_note": 40}, "NOT_FOUND", "used pads: 36 Kick, 38 Snare"),
+        ({"pad_note": 200}, "INVALID_ARG", "0..127"),
+        ({}, "INVALID_ARG", "not both"),
+        ({"device_path": [1], "pad_note": 36}, "INVALID_ARG", "not both"),
+    ]
+    song.create_midi_track(-1)
+    with pytest.raises(OpError) as e:
+        ops.replace_sample(song, app, {"track": 1, "pad_note": 36, "file_path": wav})
+    assert e.value.code == "NOT_FOUND" and "no Drum Rack" in str(e.value)
+    for extra, code, text in cases:
+        with pytest.raises(OpError) as e:
+            ops.replace_sample(song, app, {"track": 0, "file_path": wav, **extra})
+        assert e.value.code == code and text in str(e.value), extra
+    assert song.tracks[0].devices[1].file_path is None
+
+
+def test_insert_device_appends_to_track_and_main(live):
+    song, app = live
+    song.create_midi_track(-1)
+    song.tracks[0].devices = [Device("Drift")]
+    assert ops.insert_device(song, app, {"track": 0, "device_name": "Reverb"}) == {
+        "track": 0, "device": "Reverb", "device_index": 1}
+    assert ops.insert_device(song, app, {"track": 0, "device_name": "Channel EQ", "index": 9})["device_index"] == 2
+    assert ops.insert_device(song, app, {"track": 0, "device_name": "Limiter", "index": 1})["device_index"] == 1
+    assert [d.name for d in song.tracks[0].devices] == ["Drift", "Limiter", "Reverb", "Channel EQ"]
+    out = ops.insert_device(song, app, {"track": "main", "device_name": "Limiter"})
+    assert out == {"track": "main", "device": "Limiter", "device_index": 0}
+    assert [d.name for d in song.master_track.devices] == ["Limiter"]
+    assert ops.OPS["insert_device"][1] is True
+
+
+def test_insert_device_maps_live_error(live):
+    song, app = live
+    song.create_midi_track(-1)
+    with pytest.raises(OpError) as e:
+        ops.insert_device(song, app, {"track": 0, "device_name": "EQ Eight"})
+    assert e.value.code == "INVALID_ARG" and "native Live devices" in str(e.value) and ".." not in str(e.value)
+    for args in ({"track": 0, "device_name": ""}, {"track": 0, "device_name": "Limiter", "index": -2}):
+        with pytest.raises(OpError) as e:
+            ops.insert_device(song, app, args)
+        assert e.value.code == "INVALID_ARG"
+    assert song.tracks[0].devices == []

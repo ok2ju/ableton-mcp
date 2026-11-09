@@ -1,4 +1,4 @@
-"""MCP stdio server: 29 tools. 27 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+"""MCP stdio server: 32 tools. 30 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
 Vital synth presets as files (vital.py) and work without Live.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
@@ -16,7 +16,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from . import lessons, midifile, theory, vital
+from . import lessons, midifile, samples, theory, vital
 from .live_client import INSTALL_HINT, PROTOCOL_VERSION, LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
@@ -60,6 +60,7 @@ INSTRUMENTS = {
 # Kinds Live Lite lacks -> the Lite kind to use instead. Refused before calling Live (non-Lite devices block saving).
 NOT_IN_LITE = {"operator": "drift", "wavetable": "drift", "analog": "drift", "meld": "drift", "sampler": "simpler"}
 InstrumentKind = Literal[tuple(INSTRUMENTS)]
+SampleRoot = Literal["samples", "user_library"]
 
 
 @dataclass
@@ -471,6 +472,76 @@ def set_device_parameters(track: int, device_path: list[int], values: dict[str, 
     Raw values are not units: check display in the result and set again if it is off.
     If any entry is invalid, nothing changes. undo_last restores all of them."""
     return _call("set_parameters", {"track": track, "device_path": device_path, "values": values})
+
+
+def _needs(feature: str, version: str) -> CallToolResult | None:
+    """None if the connected Live reports feature in live_status, else the error to return. Runs before any write."""
+    try:
+        hello = client.call("hello", {})
+    except (LiveUnavailable, LiveTimeout, LiveError) as e:
+        return _error(str(e))
+    if hello.get("protocol_version") != PROTOCOL_VERSION:
+        return _error(f"The installed Remote Script is out of date. {INSTALL_HINT}")
+    if not hello.get("features", {}).get(feature):
+        return _error(f"This needs Live {version}+; this is Live {hello.get('live_version')}.")
+    return None
+
+
+def _sample_file(root: str | None, path: list[str] | None, file_path: str | None) -> str | CallToolResult:
+    try:
+        return str(samples.resolve(root, path, file_path))
+    except ValueError as e:
+        return _error(str(e))
+
+
+@mcp.tool(annotations=WRITES)
+def create_audio_clip(
+    track: int, slot: int, root: SampleRoot | None = None, path: list[str] | None = None,
+    file_path: str | None = None, name: str | None = None,
+) -> CallToolResult:
+    """Put an audio sample into an empty Session clip slot of an audio track (get_set_overview type "audio").
+    Name the sample in one of two ways: root ("samples" or "user_library") and path exactly as browse_library
+    shows them, e.g. root "samples", path ["Atmos Calm 130 bpm.wav"]; or file_path, an absolute path to any
+    .wav, .aif, .aiff, .flac, .mp3 or .ogg file.
+    Live chooses whether to warp (follow the Set's tempo): the result reports warping and length_beats. Needs Live 12.4+."""
+    refused = _needs("audio_clip", "12.4")
+    if refused:
+        return refused
+    file = _sample_file(root, path, file_path)
+    if isinstance(file, CallToolResult):
+        return file
+    args = {"track": track, "slot": slot, "file_path": file}
+    if name is not None:
+        args["name"] = name
+    return _call("create_audio_clip", args)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def replace_sample(
+    track: int, device_path: list[int] | None = None, pad_note: int | None = None,
+    root: SampleRoot | None = None, path: list[str] | None = None, file_path: str | None = None,
+) -> CallToolResult:
+    """Swap the sample a Simpler plays. Pick the Simpler by device_path (as in read_device) or by pad_note,
+    the note of a Drum Rack pad (get_set_overview drum_pads), not both. The old sample is gone; undo_last restores it.
+    Name the sample as in create_audio_clip: root and path from browse_library, or an absolute file_path. Needs Live 12.4+."""
+    refused = _needs("replace_sample", "12.4")
+    if refused:
+        return refused
+    file = _sample_file(root, path, file_path)
+    if isinstance(file, CallToolResult):
+        return file
+    return _call("replace_sample", {"track": track, "device_path": device_path, "pad_note": pad_note, "file_path": file})
+
+
+@mcp.tool(annotations=WRITES)
+def insert_device(track: int | Literal["main"], device_name: str, index: int = -1) -> CallToolResult:
+    """Add a native Live audio or MIDI effect, e.g. "Limiter", "Channel EQ" or "Reverb", by its browser name.
+    The track's instrument stays. index -1 adds it after the last device. track "main" is the Main track,
+    where a Limiter keeps the whole mix from clipping. Plug-ins are refused. Needs Live 12.3+."""
+    refused = _needs("insert_device", "12.3")
+    if refused:
+        return refused
+    return _call("insert_device", {"track": track, "device_name": device_name, "index": index})
 
 
 @mcp.tool(annotations=WRITES)

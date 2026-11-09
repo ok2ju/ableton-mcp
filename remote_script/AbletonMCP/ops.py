@@ -4,12 +4,13 @@
 """
 
 import difflib
+import os
 import sys
 
 from .bridge import OpError
 
-SCRIPT_VERSION = "0.5.0"
-PROTOCOL_VERSION = 5
+SCRIPT_VERSION = "0.6.0"
+PROTOCOL_VERSION = 6
 
 
 def hello(song, app, args):
@@ -26,6 +27,7 @@ def hello(song, app, args):
             "insert_device": hasattr(Live.Track.Track, "insert_device"),
             "replace_sample": hasattr(Live.SimplerDevice.SimplerDevice, "replace_sample"),
             "arrangement_create_midi_clip": hasattr(Live.Track.Track, "create_midi_clip"),
+            "audio_clip": hasattr(Live.ClipSlot.ClipSlot, "create_audio_clip"),
         },
     }
 
@@ -200,6 +202,38 @@ def get_overview(song, app, args):
             {"send": SEND_LETTERS[i], "name": r.name, "devices": [d.name for d in r.devices]}
             for i, r in enumerate(song.return_tracks)
         ],
+    }
+
+
+def _audio_file(args):
+    # The server resolved and checked this path; check again because Live runs in another process.
+    path = args["file_path"]
+    if not isinstance(path, str) or not os.path.isabs(path) or not os.path.isfile(path):
+        raise OpError("INVALID_ARG", f"no audio file at {path!r}; give an absolute path to an existing file")
+    return path
+
+
+def create_audio_clip(song, app, args):
+    """Put an audio file into an empty Session clip slot of an audio track."""
+    track = _track(song, args)
+    if track.is_foldable:
+        raise OpError("LIVE_STATE", "group tracks hold no clips")
+    if track.has_midi_input:
+        raise OpError("LIVE_STATE", "audio clips need an audio track")
+    slot = _slot(song, args)
+    if slot.has_clip:
+        raise OpError("LIVE_STATE", "that clip slot has a clip; delete_clip it first or pick an empty slot")
+    path = _audio_file(args)
+    try:
+        slot.create_audio_clip(path)
+    except Exception as e:  # one Live call; its exception type is unverified
+        raise OpError("INVALID_ARG", f"Live could not load {path}: {e}")
+    clip = slot.clip
+    if args.get("name"):
+        clip.name = str(args["name"])
+    return {
+        "track": args["track"], "slot": args["slot"], "name": clip.name, "file": clip.file_path,
+        "length_beats": clip.length, "warping": bool(clip.warping),
     }
 
 
@@ -567,6 +601,79 @@ def _device(song, args):
     return device
 
 
+SIMPLER_CLASS = "OriginalSimpler"
+
+
+def _pad_simpler(track, note):
+    """The first Simpler in the first chain of the Drum Rack pad that plays note."""
+    if isinstance(note, bool) or not isinstance(note, int) or not 0 <= note <= 127:
+        raise OpError("INVALID_ARG", "pad_note must be a MIDI note 0..127")
+    rack = _find_drum_rack(track.devices, depth=1)
+    if rack is None:
+        raise OpError("NOT_FOUND", "that track has no Drum Rack; give device_path instead")
+    used = [p for p in rack.drum_pads if p.chains]
+    pad = next((p for p in used if p.note == note), None)
+    if pad is None:
+        listed = ", ".join(f"{p.note} {p.name}" for p in used) or "none"
+        raise OpError("NOT_FOUND", f"no pad {note} in use in '{rack.name}'; used pads: {listed}")
+    devices = list(pad.chains[0].devices)
+    simpler = next((d for d in devices if d.class_name == SIMPLER_CLASS), None)
+    if simpler is None:
+        names = ", ".join(d.name for d in devices) or "nothing"
+        raise OpError("INVALID_ARG", f"pad {note} '{pad.name}' holds {names}, not a Simpler")
+    return simpler
+
+
+def replace_sample(song, app, args):
+    """Swap the sample in a Simpler, given by device_path or by the Drum Rack pad note that plays it."""
+    by_path, by_pad = args.get("device_path") is not None, args.get("pad_note") is not None
+    if by_path == by_pad:
+        raise OpError("INVALID_ARG", "give device_path or pad_note, not both")
+    if by_path:
+        device = _device(song, args)
+        if device.class_name != SIMPLER_CLASS:
+            raise OpError("INVALID_ARG", f"'{device.name}' is not a Simpler")
+    else:
+        device = _pad_simpler(_track(song, args), args["pad_note"])
+    path = _audio_file(args)
+    try:
+        device.replace_sample(path)
+    except Exception as e:  # one Live call; its exception type is unverified
+        raise OpError("INVALID_ARG", f"Live could not load {path}: {e}")
+    return {
+        "track": args["track"], "device_path": args.get("device_path"), "pad_note": args.get("pad_note"),
+        "device": device.name, "file": path,
+    }
+
+
+def insert_device(song, app, args):
+    """Add a native Live device by its browser name, after the existing devices unless index says otherwise.
+    track "main" is the Main (master) track."""
+    track = song.master_track if args["track"] == "main" else _track(song, args)
+    name = args["device_name"]
+    if not isinstance(name, str) or not name.strip():
+        raise OpError("INVALID_ARG", "device_name must be a device name such as 'Limiter'")
+    index = args.get("index", -1)
+    if isinstance(index, bool) or not isinstance(index, int) or index < -1:
+        raise OpError("INVALID_ARG", "index must be -1 (end) or a device position 0, 1, ...")
+    before = {_device_key(d) for d in track.devices}
+    append = index == -1 or index >= len(before)
+    try:
+        if append:
+            track.insert_device(name)
+        else:
+            track.insert_device(name, index)
+    except Exception as e:  # one Live call; its exception type is unverified
+        raise OpError("INVALID_ARG", (
+            f"Live could not insert '{name}': {str(e).rstrip('.')}. insert_device takes native Live devices by their browser name, "
+            "not plug-ins, and Lite lacks some (e.g. EQ Eight; use Channel EQ)"
+        ))
+    devices = list(track.devices)
+    new = [i for i, d in enumerate(devices) if _device_key(d) not in before]
+    at = new[0] if new else (len(devices) - 1 if append else index)
+    return {"track": args["track"], "device": devices[at].name, "device_index": at}
+
+
 def _param_info(i, p):
     info = {
         "index": i, "name": p.name, "value": p.value, "min": p.min, "max": p.max,
@@ -664,6 +771,9 @@ OPS = {
     "load_item": (load_item, True),
     "get_device": (get_device, False),
     "set_parameters": (set_parameters, True),
+    "create_audio_clip": (create_audio_clip, True),
+    "replace_sample": (replace_sample, True),
+    "insert_device": (insert_device, True),
     "set_mix": (set_mix, True),
     "set_label": (set_label, True),
 }

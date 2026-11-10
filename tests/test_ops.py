@@ -608,6 +608,41 @@ def test_set_parameters_refusals_change_nothing(drift_set):
     assert [p.value for p in params] == [1, 0.85, 0, 0.2, 0.5]
 
 
+def test_set_envelope_device_cutoff_ramp_in_raw_values(drift_set):
+    song, app = drift_set
+    song.tracks[0].clip_slots[0].create_clip(16.0)
+    clip = song.tracks[0].clip_slots[0].clip
+    cutoff = song.tracks[0].devices[1].chains[0].devices[0].parameters[1]
+    points = [{"time": 0, "value": 0.2}, {"time": 8, "value": 1.0}]
+    args = {"track": 0, "slot": 0, "device_path": [1, 0, 0], "parameter": "filter freq", "points": points}
+    out = ops.set_envelope(song, app, args)
+    steps = clip.envelopes[cutoff].steps
+    assert out["steps"] == len(steps) == 33  # 32 ramp steps + the hold to the clip end
+    assert steps[0] == (0.0, 0.25, 0.2) and steps[16][2] == pytest.approx(0.6)  # linear in raw units
+    assert steps[-1] == (8.0, 8.0, 1.0) and cutoff.value == 0.85
+    shape = song.tracks[0].devices[1].chains[0].devices[0].parameters[2]
+    ops.set_envelope(song, app, {**args, "parameter": "Osc 1 Shape", "points": [{"time": 0, "value": "saw"}, {"time": 1, "value": 0}]})
+    assert [s[2] for s in clip.envelopes[shape].steps] == [2, 2, 2, 2, 0]  # quantized: held, not interpolated
+
+
+def test_set_envelope_device_refusals_write_nothing(drift_set):
+    song, app = drift_set
+    song.tracks[0].clip_slots[0].create_clip(16.0)
+    clip = song.tracks[0].clip_slots[0].clip
+    args = {"track": 0, "slot": 0, "device_path": [0], "points": [{"time": 0, "value": 0.5}]}
+    e = _err(ops.set_envelope, song, app, {**args, "parameter": "Fliter Freq"})
+    assert e.code == "NOT_FOUND" and "did you mean Filter Freq" in str(e)
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "device_path": [5]}).code == "NOT_FOUND"
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "device_path": ["a"]}).code == "INVALID_ARG"
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Env Amount"}).code == "LIVE_STATE"
+    e = _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "points": [{"time": 0, "value": 1.5}]})
+    assert e.code == "INVALID_ARG" and "point 0" in str(e) and "0.0..1.0" in str(e)
+    for value in ("Noise", 1.5, True):
+        assert _err(ops.set_envelope, song, app, {**args, "parameter": "Osc 1 Shape", "points": [{"time": 0, "value": value}]}).code == "INVALID_ARG"
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "points": [{"time": 0}]}).code == "INVALID_ARG"
+    assert clip.envelopes == {} and clip.cleared == []
+
+
 def test_hello_on_12_4_reports_sample_features():
     install_fake_live_module((12, 4, 16))
     song = Song()

@@ -81,7 +81,7 @@ class Section:
 @dataclass
 class EnvelopePoint:
     time: float  # beats from the clip start, 0..clip length
-    value: float  # dB for volume and sends, -50..50 for pan
+    value: float | str  # dB for volume and sends, -50..50 for pan, raw min..max (or an item name) for a device parameter
 
 
 @dataclass
@@ -699,19 +699,28 @@ def set_track_mix(
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
-def set_clip_envelope(track: int, slot: int, parameter: str, points: list[EnvelopePoint]) -> CallToolResult:
-    """Automate the track's own volume, pan or a send inside one Session clip, e.g. a volume rise over a Build clip.
-    parameter: "volume" or "send A", "send B", ... (values in dB, max +6), or "pan" (-50 = 50L .. 50 = 50R).
+def set_clip_envelope(
+    track: int, slot: int, parameter: str, points: list[EnvelopePoint], device_path: list[int] | None = None,
+) -> CallToolResult:
+    """Automate the track's own volume, pan, a send, or a device parameter inside one Session clip,
+    e.g. a volume rise or a filter cutoff sweep over a Build clip.
+    Without device_path, parameter is "volume" or "send A", "send B", ... (values in dB, max +6), or "pan"
+    (-50 = 50L .. 50 = 50R). With device_path (a device on this same track, as in read_device), parameter is that
+    device's parameter name as read_device shows it (case ignored), and values are raw, between the min and max
+    read_device shows (not units); a switch (quantized) parameter takes one of its items or a whole number.
     points: [{time, value}] with time in beats from the clip start (0..clip length), in rising time order,
     e.g. [{"time": 0, "value": -24}, {"time": 16, "value": 0}]. Between two points the value ramps in 1/16-note
-    steps; after the last point it holds to the clip end; before the first point it stays at the mixer's value.
+    steps (linear in dB, pan or raw units; a switch holds each point's item until the next point); after the last
+    point it holds to the clip end; before the first point it stays at the control's current value.
     Replaces that control's envelope in the clip; points=[] only clears it. All-or-nothing, one undo step.
     The envelope plays whenever the clip plays; arrange_scenes copies the clip to the Arrangement. Needs Live 12.4+."""
     refused = _needs("clip_envelopes", "12.4")
     if refused:
         return refused
-    return _call("set_envelope", {"track": track, "slot": slot, "parameter": parameter,
-                                  "points": [asdict(p) for p in points]})
+    args = {"track": track, "slot": slot, "parameter": parameter, "points": [asdict(p) for p in points]}
+    if device_path is not None:
+        args["device_path"] = device_path
+    return _call("set_envelope", args)
 
 
 @mcp.tool(annotations=WRITES)

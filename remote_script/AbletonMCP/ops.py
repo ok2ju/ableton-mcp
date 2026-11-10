@@ -567,8 +567,12 @@ def set_mix(song, app, args):
 ENVELOPE_STEP = 0.25  # beats: a 1/16 note
 
 
-def _envelope_target(track, name):
-    """(param, unit) for a clip envelope target: "volume" and "send A".. in dB, "pan" in -50..50."""
+def _envelope_target(song, args):
+    """(param, unit) for a clip envelope target: "volume" and "send A".. in dB, "pan" in -50..50,
+    and with device_path a device parameter by name in raw units."""
+    if args.get("device_path") is not None:
+        return _param_by_name(_device(song, args), args["parameter"])[1], "raw"
+    track, name = _track(song, args), args["parameter"]
     m = track.mixer_device
     if name == "volume":
         return m.volume, "db"
@@ -584,12 +588,11 @@ def _envelope_target(track, name):
 
 
 def set_envelope(song, app, args):
-    track = _track(song, args)
     slot = _slot(song, args)
     if not slot.has_clip:
         raise OpError("NOT_FOUND", "that clip slot is empty")
     clip = slot.clip
-    param, unit = _envelope_target(track, args["parameter"])
+    param, unit = _envelope_target(song, args)
     points = args["points"]
     if not isinstance(points, list):
         raise OpError("INVALID_ARG", "points must be a list of {time, value}")
@@ -598,7 +601,16 @@ def set_envelope(song, app, args):
     for i, point in enumerate(points):
         if not isinstance(point, dict):
             raise OpError("INVALID_ARG", f"point {i} must be an object {{time, value}}")
-        time, value = _number(point, "time"), _number(point, "value")
+        time = _number(point, "time")
+        if unit == "raw":  # the device parameter's own min..max, or an item name for a quantized one
+            if "value" not in point:
+                raise OpError("INVALID_ARG", f"point {i} needs a value")
+            try:
+                value = _param_value(param, point["value"])
+            except OpError as e:
+                raise OpError(e.code, f"point {i}: {e}")
+        else:
+            value = _number(point, "value")
         if not 0 <= time <= clip.length:
             raise OpError("INVALID_ARG", f"point {i} time {time:g} is outside the clip (0..{clip.length:g} beats)")
         if times and time <= times[-1]:
@@ -617,18 +629,24 @@ def set_envelope(song, app, args):
     raw = {}  # display value rounded to 0.1 -> raw; the dB search is 80 str_for_value calls
 
     def step(start, length, value):
+        if unit == "raw":
+            envelope.insert_step(start, length, value)
+            return
         key = round(value, 1)
         if key not in raw:
             raw[key] = _db_value(param, key) if unit == "db" else _pan_value(param, key)
         envelope.insert_step(start, length, raw[key])
 
-    # Ramp each pair in 1/16 steps, interpolated in display units; each step takes the value at its start.
+    # Ramp each pair in 1/16 steps, interpolated in display (or raw) units; each step takes the value at its start.
+    # A quantized device parameter does not interpolate: it holds each point's value until the next point.
+    quantized = unit == "raw" and param.is_quantized
     count = 0
     for t0, v0, t1, v1 in zip(times, values, times[1:], values[1:]):
         k = 0
         while t0 + k * ENVELOPE_STEP < t1:
             start = t0 + k * ENVELOPE_STEP
-            step(start, min(ENVELOPE_STEP, t1 - start), v0 + (v1 - v0) * (start - t0) / (t1 - t0))
+            value = v0 if quantized else v0 + (v1 - v0) * (start - t0) / (t1 - t0)
+            step(start, min(ENVELOPE_STEP, t1 - start), value)
             count += 1
             k += 1
     if times[-1] < clip.length:  # hold the last value to the clip end
@@ -1100,28 +1118,34 @@ def _param_value(p, value):
     return value
 
 
+def _param_by_name(device, name):
+    """(index, param) for a read_device parameter name, case ignored. Refuses unknown, ambiguous and disabled names."""
+    params = list(device.parameters)
+    names = [p.name.lower() for p in params]
+    hits = [i for i, n in enumerate(names) if n == str(name).lower()]
+    if not hits:
+        close = difflib.get_close_matches(str(name).lower(), names, n=3)
+        hint = f"did you mean {', '.join(params[names.index(c)].name for c in close)}?" if close else "read_device lists the names"
+        raise OpError("NOT_FOUND", f"'{device.name}' has no parameter '{name}'; {hint}")
+    if len(hits) > 1:
+        raise OpError("INVALID_ARG", f"'{device.name}' has {len(hits)} parameters named '{name}'")
+    p = params[hits[0]]
+    if not p.is_enabled:
+        raise OpError("LIVE_STATE", f"'{p.name}' is controlled by a macro or locked")
+    return hits[0], p
+
+
 def set_parameters(song, app, args):
     device = _device(song, args)
     values = args["values"]
     if not isinstance(values, dict) or not values:
         raise OpError("INVALID_ARG", "values must map parameter names to values")
-    params = list(device.parameters)
-    names = [p.name.lower() for p in params]
     todo = []
     for name, value in values.items():  # validate everything before setting anything
-        hits = [i for i, n in enumerate(names) if n == str(name).lower()]
-        if not hits:
-            close = difflib.get_close_matches(str(name).lower(), names, n=3)
-            hint = f"did you mean {', '.join(params[names.index(c)].name for c in close)}?" if close else "read_device lists the names"
-            raise OpError("NOT_FOUND", f"'{device.name}' has no parameter '{name}'; {hint}")
-        if len(hits) > 1:
-            raise OpError("INVALID_ARG", f"'{device.name}' has {len(hits)} parameters named '{name}'")
-        if any(i == hits[0] for i, _, _ in todo):
+        index, p = _param_by_name(device, name)
+        if any(i == index for i, _, _ in todo):
             raise OpError("INVALID_ARG", f"'{name}' is given twice")
-        p = params[hits[0]]
-        if not p.is_enabled:
-            raise OpError("LIVE_STATE", f"'{p.name}' is controlled by a macro or locked")
-        todo.append((hits[0], p, _param_value(p, value)))
+        todo.append((index, p, _param_value(p, value)))
     for _, p, value in todo:
         p.value = value
     return {"track": args["track"], "device_path": args["device_path"], "changed": [_param_info(i, p) for i, p, _ in todo]}

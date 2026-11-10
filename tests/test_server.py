@@ -886,6 +886,9 @@ def test_set_clip_envelope_sends_points(monkeypatch):
     monkeypatch.setattr(server, "client", fake)
     assert call_tool("set_clip_envelope", {"track": 1, "slot": 2, "parameter": "send A", "points": RAMP}).is_error is False
     assert fake.calls[1] == ("set_envelope", {"track": 1, "slot": 2, "parameter": "send A", "points": RAMP})
+    cutoff = [{"time": 0, "value": 0.2}, {"time": 8, "value": "On"}]
+    call_tool("set_clip_envelope", {"track": 1, "slot": 2, "parameter": "Frequency", "points": cutoff, "device_path": [1]})
+    assert fake.calls[3] == ("set_envelope", {"track": 1, "slot": 2, "parameter": "Frequency", "points": cutoff, "device_path": [1]})
 
 
 def test_insert_device_main(monkeypatch):

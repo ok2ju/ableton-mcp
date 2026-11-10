@@ -29,6 +29,7 @@ def hello(song, app, args):
             "arrangement_create_midi_clip": hasattr(Live.Track.Track, "create_midi_clip"),
             "audio_clip": hasattr(Live.ClipSlot.ClipSlot, "create_audio_clip"),
             "arrangement": hasattr(Live.Track.Track, "duplicate_clip_to_arrangement"),
+            "clip_envelopes": hasattr(Live.Clip.Clip, "create_automation_envelope"),
         },
     }
 
@@ -114,12 +115,21 @@ def _lowest_value(param, above):
     return hi
 
 
-def _set_db(param, db):
-    """Set the value Live displays as db. Live rounds the display to 0.1 dB, so aim at the middle
+def _db_value(param, db):
+    """The raw value Live displays as db. Live rounds the display to 0.1 dB, so aim at the middle
     of the values that display as db, not at its edge."""
     start = _lowest_value(param, lambda d: d >= db)
     end = _lowest_value(param, lambda d: d > db)
-    param.value = (start + end) / 2
+    return (start + end) / 2
+
+
+def _set_db(param, db):
+    param.value = _db_value(param, db)
+
+
+def _pan_value(param, pan):
+    """Raw value for pan -50 (50L) .. 50 (50R)."""
+    return param.min + (pan + 50) / 100 * (param.max - param.min)
 
 
 def _pan(param):
@@ -544,8 +554,7 @@ def set_mix(song, app, args):
     if volume is not None:
         _set_db(m.volume, volume)
     if pan is not None:
-        p = m.panning
-        p.value = p.min + (pan + 50) / 100 * (p.max - p.min)
+        m.panning.value = _pan_value(m.panning, pan)
     if "mute" in args:
         track.mute = args["mute"]
     if "solo" in args:  # Live bypasses exclusive solo here: other tracks stay soloed
@@ -553,6 +562,79 @@ def set_mix(song, app, args):
     for letter, db in sends.items():
         _set_db(params[letter], float(db))
     return {"track": args["track"], **_mix(song, track)}
+
+
+ENVELOPE_STEP = 0.25  # beats: a 1/16 note
+
+
+def _envelope_target(track, name):
+    """(param, unit) for a clip envelope target: "volume" and "send A".. in dB, "pan" in -50..50."""
+    m = track.mixer_device
+    if name == "volume":
+        return m.volume, "db"
+    if name == "pan":
+        return m.panning, "pan"
+    sends = dict(zip(SEND_LETTERS, m.sends))
+    letter = name[5:] if isinstance(name, str) and name.startswith("send ") else None
+    if letter in sends:
+        return sends[letter], "db"
+    if letter is not None:
+        raise OpError("INVALID_ARG", f"no send {letter!r}; this Set has sends {', '.join(sends) or 'none'}")
+    raise OpError("INVALID_ARG", 'parameter must be "volume", "pan" or "send A", "send B", ...')
+
+
+def set_envelope(song, app, args):
+    track = _track(song, args)
+    slot = _slot(song, args)
+    if not slot.has_clip:
+        raise OpError("NOT_FOUND", "that clip slot is empty")
+    clip = slot.clip
+    param, unit = _envelope_target(track, args["parameter"])
+    points = args["points"]
+    if not isinstance(points, list):
+        raise OpError("INVALID_ARG", "points must be a list of {time, value}")
+    # Validate every point first, so a bad one writes nothing.
+    times, values = [], []
+    for i, point in enumerate(points):
+        if not isinstance(point, dict):
+            raise OpError("INVALID_ARG", f"point {i} must be an object {{time, value}}")
+        time, value = _number(point, "time"), _number(point, "value")
+        if not 0 <= time <= clip.length:
+            raise OpError("INVALID_ARG", f"point {i} time {time:g} is outside the clip (0..{clip.length:g} beats)")
+        if times and time <= times[-1]:
+            raise OpError("INVALID_ARG", f"point {i} time {time:g} must be later than the point before it")
+        if unit == "pan" and not -50 <= value <= 50:
+            raise OpError("INVALID_ARG", f"point {i} pan must be -50 (50L) .. 50 (50R)")
+        if unit == "db":
+            _check_db(param, value, f"point {i} {args['parameter']}")
+        times.append(time)
+        values.append(value)
+    if clip.automation_envelope(param) is not None:
+        clip.clear_envelope(param)  # replace, not merge
+    if not points:
+        return {"track": args["track"], "slot": args["slot"], "parameter": args["parameter"], "steps": 0}
+    envelope = clip.automation_envelope(param) or clip.create_automation_envelope(param)
+    raw = {}  # display value rounded to 0.1 -> raw; the dB search is 80 str_for_value calls
+
+    def step(start, length, value):
+        key = round(value, 1)
+        if key not in raw:
+            raw[key] = _db_value(param, key) if unit == "db" else _pan_value(param, key)
+        envelope.insert_step(start, length, raw[key])
+
+    # Ramp each pair in 1/16 steps, interpolated in display units; each step takes the value at its start.
+    count = 0
+    for t0, v0, t1, v1 in zip(times, values, times[1:], values[1:]):
+        k = 0
+        while t0 + k * ENVELOPE_STEP < t1:
+            start = t0 + k * ENVELOPE_STEP
+            step(start, min(ENVELOPE_STEP, t1 - start), v0 + (v1 - v0) * (start - t0) / (t1 - t0))
+            count += 1
+            k += 1
+    if times[-1] < clip.length:  # hold the last value to the clip end
+        step(times[-1], clip.length - times[-1], values[-1])
+        count += 1
+    return {"track": args["track"], "slot": args["slot"], "parameter": args["parameter"], "steps": count}
 
 
 def create_scene(song, app, args):
@@ -1080,5 +1162,6 @@ OPS = {
     "insert_device": (insert_device, True),
     "delete_device": (delete_device, True),
     "set_mix": (set_mix, True),
+    "set_envelope": (set_envelope, True),
     "set_label": (set_label, True),
 }

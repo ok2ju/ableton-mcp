@@ -382,6 +382,80 @@ def test_set_mix_refusals_change_nothing(live):
     assert _err(ops.set_mix, song, app, {"track": 0, "sends": {}}).code == "INVALID_ARG"
 
 
+def _envelope_clip(song, length=16.0):
+    song.create_midi_track(-1)
+    song.tracks[0].clip_slots[0].create_clip(length)
+    return song.tracks[0].mixer_device, song.tracks[0].clip_slots[0].clip
+
+
+def test_set_envelope_volume_ramp(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    points = [{"time": 0, "value": -24}, {"time": 16, "value": 0}]
+    out = ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "volume", "points": points})
+    steps = clip.envelopes[m.volume].steps
+    assert out["steps"] == len(steps) == 64
+    assert m.volume.str_for_value(steps[0][2]) == "-24.0 dB"
+    assert steps[0][:2] == (0.0, 0.25) and steps[-1][0] == 15.75
+    assert m.volume.str_for_value(steps[32][2]) == "-12.0 dB"  # linear in dB
+    assert m.volume.value == 0.85  # the fader itself is untouched
+
+
+def test_set_envelope_pan_send_and_hold_to_clip_end(live):
+    song, app = live
+    m, clip = _envelope_clip(song, 8.0)
+    ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "pan", "points": [{"time": 0, "value": -50}, {"time": 1, "value": 50}]})
+    steps = clip.envelopes[m.panning].steps
+    assert [s[2] for s in steps[:4]] == [-1.0, -0.5, 0.0, 0.5]
+    assert steps[-1] == (1.0, 7.0, 1.0)  # the last value holds to the clip end
+    out = ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "send B", "points": [{"time": 2, "value": -6}]})
+    assert out["steps"] == 1
+    (start, length, value), = clip.envelopes[m.sends[1]].steps
+    assert (start, length, m.sends[1].str_for_value(value)) == (2.0, 6.0, "-6.0 dB")
+
+
+def test_set_envelope_replaces_and_empty_points_only_clear(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    args = {"track": 0, "slot": 0, "parameter": "volume", "points": [{"time": 0, "value": -6}, {"time": 4, "value": 0}]}
+    ops.set_envelope(song, app, args)
+    ops.set_envelope(song, app, args)
+    assert len(clip.envelopes[m.volume].steps) == 17  # 16 ramp steps + the hold, not doubled
+    out = ops.set_envelope(song, app, {**args, "points": []})
+    assert out["steps"] == 0 and m.volume not in clip.envelopes
+    assert clip.cleared == [m.volume, m.volume]
+    ops.set_envelope(song, app, {**args, "points": []})  # nothing to clear: no call
+    assert clip.cleared == [m.volume, m.volume] and clip.envelopes == {}
+
+
+def test_set_envelope_refusals_write_nothing(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    args = {"track": 0, "slot": 0, "parameter": "volume"}
+    ops.set_envelope(song, app, {**args, "points": [{"time": 0, "value": -6}]})
+    before = list(clip.envelopes[m.volume].steps)
+    ok = {"time": 0, "value": -6}
+    bad = [
+        {"parameter": "send C", "points": [ok]},
+        {"parameter": "filter", "points": [ok]},
+        {"points": [ok, {"time": 4, "value": 7}]},  # above +6 dB
+        {"parameter": "pan", "points": [{"time": 0, "value": 51}]},
+        {"points": [ok, {"time": 17, "value": 0}]},  # past the clip end
+        {"points": [{"time": -1, "value": 0}]},
+        {"points": [{"time": 4, "value": 0}, ok]},  # unsorted
+        {"points": [ok, ok]},  # duplicate time
+        {"points": [{"time": "0", "value": 0}]},
+        {"points": [[0, 0]]},
+        {"points": {"time": 0}},
+    ]
+    for extra in bad:
+        assert _err(ops.set_envelope, song, app, {**args, **extra}).code == "INVALID_ARG", extra
+    e = _err(ops.set_envelope, song, app, {**args, "parameter": "send C", "points": [ok]})
+    assert "A, B" in str(e)
+    assert clip.cleared == [] and list(clip.envelopes) == [m.volume] and clip.envelopes[m.volume].steps == before
+    assert _err(ops.set_envelope, song, app, {**args, "slot": 1, "points": [ok]}).code == "NOT_FOUND"
+
+
 def test_create_scene(live):
     song, app = live
     assert ops.create_scene(song, app, {"name": "Outro"}) == {"scene": 8, "name": "Outro", "scene_count": 9}
@@ -543,12 +617,14 @@ def test_hello_on_12_4_reports_sample_features():
     assert out["features"]["replace_sample"] is True
     assert out["features"]["audio_clip"] is True
     assert out["features"]["arrangement"] is True
+    assert out["features"]["clip_envelopes"] is True
 
 
 def test_hello_old_live_lacks_audio_clip(live):
     song, app = live
     features = ops.hello(song, app, {})["features"]
     assert features["audio_clip"] is False and features["arrangement"] is False
+    assert features["clip_envelopes"] is False
 
 
 def test_play_arrangement(live):

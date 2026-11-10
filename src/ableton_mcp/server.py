@@ -1,4 +1,4 @@
-"""MCP stdio server: 40 tools. 36 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+"""MCP stdio server: 41 tools. 37 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
 Vital synth presets as files (vital.py), 1 lists a folder of the user's samples (samples.py) and 1 estimates a
 sample's tempo and key (hearing.py, optional librosa extra); those 4 work without Live.
 
@@ -76,6 +76,12 @@ BEAT_DIVISIONS = ("1/16", "1/16T", "1/8", "1/8T", "1/4", "1/4T", "1/2", "1/2T", 
 class Section:
     scene: int  # scene index, as in get_set_overview
     bars: int  # 1-256 bars of 4/4
+
+
+@dataclass
+class EnvelopePoint:
+    time: float  # beats from the clip start, 0..clip length
+    value: float  # dB for volume and sends, -50..50 for pan
 
 
 @dataclass
@@ -690,6 +696,22 @@ def set_track_mix(
     solo is not exclusive: Live does not unsolo other tracks, so unsolo them yourself. Returns the track's resulting mix."""
     fields = {"volume_db": volume_db, "pan": pan, "mute": mute, "solo": solo, "sends": sends}
     return _call("set_mix", {"track": track, **{k: v for k, v in fields.items() if v is not None}})
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def set_clip_envelope(track: int, slot: int, parameter: str, points: list[EnvelopePoint]) -> CallToolResult:
+    """Automate the track's own volume, pan or a send inside one Session clip, e.g. a volume rise over a Build clip.
+    parameter: "volume" or "send A", "send B", ... (values in dB, max +6), or "pan" (-50 = 50L .. 50 = 50R).
+    points: [{time, value}] with time in beats from the clip start (0..clip length), in rising time order,
+    e.g. [{"time": 0, "value": -24}, {"time": 16, "value": 0}]. Between two points the value ramps in 1/16-note
+    steps; after the last point it holds to the clip end; before the first point it stays at the mixer's value.
+    Replaces that control's envelope in the clip; points=[] only clears it. All-or-nothing, one undo step.
+    The envelope plays whenever the clip plays; arrange_scenes copies the clip to the Arrangement. Needs Live 12.4+."""
+    refused = _needs("clip_envelopes", "12.4")
+    if refused:
+        return refused
+    return _call("set_envelope", {"track": track, "slot": slot, "parameter": parameter,
+                                  "points": [asdict(p) for p in points]})
 
 
 @mcp.tool(annotations=WRITES)

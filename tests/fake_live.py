@@ -99,6 +99,16 @@ class CuePoint:
         return self._time
 
 
+class Envelope:
+    """Records insert_step calls as (time, length, value)."""
+
+    def __init__(self):
+        self.steps = []
+
+    def insert_step(self, time, length, value):
+        self.steps.append((time, length, value))
+
+
 class Clip:
     def __init__(self, length, is_midi_clip=True):
         self.name = ""
@@ -117,6 +127,8 @@ class Clip:
         self.pitch_fine = 0
         self.notes = []
         self._next_id = 1
+        self.envelopes = {}  # param -> Envelope
+        self.cleared = []  # params passed to clear_envelope
 
     # Live refuses a start at or past its end, like the real setters.
     def _check(self, start, end):
@@ -147,6 +159,20 @@ class Clip:
 
     def remove_notes_by_id(self, ids):
         self.notes = [n for n in self.notes if n.note_id not in set(ids)]
+
+    # Clip envelopes as probed on Live 12.4.16 (docs/ableton-mcp-research.md 3.4).
+    def automation_envelope(self, param):
+        return self.envelopes.get(param)
+
+    def create_automation_envelope(self, param):
+        if param in self.envelopes:
+            raise RuntimeError("Envelope already exists")
+        self.envelopes[param] = Envelope()
+        return self.envelopes[param]
+
+    def clear_envelope(self, param):
+        self.cleared.append(param)
+        self.envelopes.pop(param, None)
 
 
 class ClipSlot:
@@ -412,12 +438,13 @@ class Track12_1:
 
 def install_fake_live_module(version=(12, 1, 10)):
     """Put a fake `Live` package into sys.modules and return it. Below 12.4 the classes hello inspects
-    lack insert_device, replace_sample and create_audio_clip; the fake objects themselves always have them."""
+    lack insert_device, replace_sample, create_audio_clip and clip envelopes; the fake objects themselves always have them."""
     live = types.ModuleType("Live")
     modern = version >= (12, 4)
     live.Track = types.SimpleNamespace(Track=Track if modern else Track12_1)
     live.SimplerDevice = types.SimpleNamespace(SimplerDevice=SimplerDevice if modern else type("SimplerDevice", (), {}))
     live.ClipSlot = types.SimpleNamespace(ClipSlot=ClipSlot if modern else type("ClipSlot", (), {}))
-    live.Clip = types.SimpleNamespace(MidiNoteSpecification=MidiNoteSpecification)
+    live.Clip = types.SimpleNamespace(MidiNoteSpecification=MidiNoteSpecification,
+                                      Clip=Clip if modern else type("Clip", (), {}))
     sys.modules["Live"] = live
     return live

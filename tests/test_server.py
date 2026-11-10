@@ -41,6 +41,7 @@ TOOL_NAMES = [
     "insert_device",
     "delete_device",
     "set_track_mix",
+    "set_clip_envelope",
     "set_label",
     "set_tempo",
     "play_clip",
@@ -59,7 +60,7 @@ READ_ONLY_TOOLS = {
 }
 DESTRUCTIVE_TOOLS = {
     "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device", "arrange_scenes",
-    "create_drum_pattern", "create_bassline", "create_chord_progression",
+    "set_clip_envelope", "create_drum_pattern", "create_bassline", "create_chord_progression",
 }
 
 
@@ -778,10 +779,12 @@ def test_vital_create_preset_white_noise_sample(vital_dir):
 
 HELLO_12_4 = {
     "protocol_version": server.PROTOCOL_VERSION, "live_version": "12.4.16", "variant": "Lite",
-    "features": {"insert_device": True, "replace_sample": True, "audio_clip": True, "arrangement": True},
+    "features": {"insert_device": True, "replace_sample": True, "audio_clip": True, "arrangement": True,
+                 "clip_envelopes": True},
 }
 HELLO_12_1 = {**HELLO_12_4, "live_version": "12.1.10",
-              "features": {"insert_device": False, "replace_sample": False, "audio_clip": False, "arrangement": False}}
+              "features": {"insert_device": False, "replace_sample": False, "audio_clip": False, "arrangement": False,
+                           "clip_envelopes": False}}
 SAMPLE_TOOLS = [
     ("create_audio_clip", {"track": 0, "slot": 0}),
     ("replace_sample", {"track": 0, "pad_note": 36}),
@@ -864,6 +867,25 @@ def test_arrange_scenes_sends_sections(monkeypatch):
     monkeypatch.setattr(server, "client", fake)
     assert call_tool("arrange_scenes", {"sections": SECTIONS, "replace": True}).is_error is False
     assert fake.calls == [("hello", {}), ("arrange", {"sections": SECTIONS, "replace": True})]
+
+
+RAMP = [{"time": 0, "value": -24}, {"time": 16, "value": 0}]
+
+
+def test_set_clip_envelope_refused_without_feature(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_1})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("set_clip_envelope", {"track": 0, "slot": 0, "parameter": "volume", "points": RAMP})
+    assert result.is_error is True and "needs Live 12.4+" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+    assert server.PROTOCOL_VERSION == 9  # this release's one bump already happened
+
+
+def test_set_clip_envelope_sends_points(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_4, "set_envelope": {"steps": 64}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("set_clip_envelope", {"track": 1, "slot": 2, "parameter": "send A", "points": RAMP}).is_error is False
+    assert fake.calls[1] == ("set_envelope", {"track": 1, "slot": 2, "parameter": "send A", "points": RAMP})
 
 
 def test_insert_device_main(monkeypatch):

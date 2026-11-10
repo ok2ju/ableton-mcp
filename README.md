@@ -53,7 +53,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 40 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 41 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -87,6 +87,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `insert_device` | Add a native Live device (e.g. Limiter, Channel EQ) after the existing ones, or at `index`, without replacing the instrument; `track="main"` is the Main track (Live 12.3+) | no |
 | `delete_device` | Remove one device (effect or instrument) by `device_path`, also inside rack chains; `track="main"` is the Main track (destructive, one undo step) | no |
 | `set_track_mix` | Set a track's volume (dB), pan (-50..50), mute, solo and sends (dB, by return letter); one undo step | no |
+| `set_clip_envelope` | Automate a Session clip's own track `volume` (dB), `pan` (-50..50) or `send A`.. (dB) from `points` `[{time, value}]` (beats, rising, inside the clip): ramps in 1/16-note steps, holds the last value to the clip end; replaces that envelope, `points=[]` clears it; all-or-nothing (destructive, one undo step; Live 12.4+) | no |
 | `set_label` | Rename and/or colour a track, a clip (track + slot) or a scene | no |
 | `set_tempo` | Set BPM (20-999) | no |
 | `play_clip` | Fire a clip | no |
@@ -101,7 +102,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 If Live or the Remote Script is not reachable, or the script reports an error, the tool returns an `isError` result with the reason.
 
-Tools that delete tracks or clips (`arrange_scenes` with `replace=true` deletes the Arrangement's clips and locators), replace a clip's notes, or write a generated clip (`create_drum_pattern`, `create_bassline`, `create_chord_progression` replace any clip in the target slot) carry `destructive_hint: true`, so the client can ask before it runs them. Every other write tool carries `destructive_hint: false`.
+Tools that delete tracks or clips (`arrange_scenes` with `replace=true` deletes the Arrangement's clips and locators), replace a clip's notes or an envelope (`set_clip_envelope`), or write a generated clip (`create_drum_pattern`, `create_bassline`, `create_chord_progression` replace any clip in the target slot) carry `destructive_hint: true`, so the client can ask before it runs them. Every other write tool carries `destructive_hint: false`.
 
 ## Lessons and resources
 
@@ -154,6 +155,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - Generators replace the clip in the target slot as one undo step. They never create tracks or load instruments. Melodic clips need an instrument on the track, or they play silent.
 - Samples: the server finds a `samples` name by exact file name in Live's Core Library, `~/Music/Ableton/Factory Packs` and the User Library (a full folder walk per call). A name found twice is refused with the paths; pass one as `file_path`. `user_library` paths are joined onto the User Library folder. Only .wav, .aif, .aiff, .flac, .mp3 and .ogg files are taken.
 - Clips are made in Session slots; `arrange_scenes` copies them onto the Arrangement. It refuses, before placing anything, a clip whose length does not divide its section (Live cannot trim an Arrangement copy: loop the clip with `set_clip`), an unwarped audio clip (its length is in seconds), and an Arrangement that already has clips or locators unless `replace=true`. Group tracks are skipped. Other Arrangement editing is not supported. `create_audio_clip` leaves warping to Live; `set_clip` then changes markers, loop, gain, pitch, warping and warp mode. Warp markers are not supported.
+- `set_clip_envelope` writes Session clip envelopes only (Live has none for Arrangement clips) and only for the clip's own track volume, pan and sends; device parameters are not supported yet. Ramps are 1/16-note steps, not smooth curves. Before the first point the envelope holds the control's mixer value at write time. Whether `arrange_scenes` copies keep the envelope is not yet checked in Live.
 - `analyze_sample` is an estimate. Beat trackers often land on half or double the tempo, so it returns both candidates; the key often comes out as its relative major or minor (A minor vs C major). It reads the whole file, a few seconds each. Without the `hearing` extra it returns the install command instead.
 - Live has no API to reverse an audio clip: load the sample into a Simpler and use `set_simpler(reverse=true)`. "Slice to Drum Rack" has no API either: `set_simpler` slices inside one Simpler instead.
 - Turning `warping` off converts an audio clip's markers from beats to seconds (4 beats became 2 s at 120 BPM on 12.4.16), so `set_clip` takes `warping` in its own call; `read_clip` it before setting markers.
@@ -206,6 +208,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 40. Live 12.4 Lite: `live_status` shows `features.arrangement: true`. With a Session clip playing and material in the Arrangement, `play_arrangement(from_bar=3)` stops the Session clip, turns off Back to Arrangement and plays the Arrangement from bar 3. `undo_last` does not undo it.
 41. Live 12.4 Lite: with clips in scenes 0 and 1, `arrange_scenes(sections=[{"scene":0,"bars":4},{"scene":1,"bars":8}])` shows 12 bars of clips in Arrangement View, each scene's clips repeated to fill its section, and two locators named after the scenes at bars 1 and 5; clicking a locator jumps there, and the song position is where it was before the call. Every section's `locator` in the result is a name, not null. `play_arrangement` plays them. Calling it again returns the `replace=true` hint; with `replace=true` the old layout is replaced. One `undo_last` removes the whole layout.
 42. With the `hearing` extra, `analyze_sample(file_path="<a loop whose name says its BPM>")` gives that BPM as `bpm`, `bpm_half` or `bpm_double` (no Live needed).
+43. Live 12.4 Lite: `live_status` shows `features.clip_envelopes: true`. On a 16-beat Session clip, `set_clip_envelope(track=0, slot=0, parameter="volume", points=[{"time":0,"value":-24},{"time":16,"value":0}])` returns `steps: 64`; the clip's Envelopes box shows a stepped volume rise over 4 bars, and it is audible when the clip plays. One `undo_last` removes it.
 
 ## Development
 

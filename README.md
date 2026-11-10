@@ -47,13 +47,14 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 32 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 36 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
 | `live_status` | Live version, edition, features, edition `limits` (`audio_midi_tracks`, `scenes`; `null` = no cap); error if the installed Remote Script is out of date | yes |
 | `get_set_overview` | Tempo, tracks, devices, Drum Rack pads (`drum_pads`), clip slots, each track's `mix`, `scenes`, `return_tracks` | yes |
 | `create_midi_track` | Add a MIDI track (refused in Lite once 8 audio+MIDI tracks exist) | no |
+| `create_audio_track` | Add an audio track, for audio clips (same Lite 8-track check) | no |
 | `create_midi_clip` | Empty MIDI clip in a slot (length in beats) | no |
 | `delete_track` | Delete a track with its clips and devices; refuses group tracks (destructive, one undo step) | no |
 | `delete_clip` | Delete the clip in a slot (destructive, one undo step) | no |
@@ -61,6 +62,8 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `copy_clip` | Copy a clip to an empty slot; an occupied target is refused | no |
 | `write_notes` | Replace all notes in a clip (beats; pitches from `drum_pads`; destructive) | no |
 | `read_notes` | Clip length and notes, in the shape `write_notes` takes | yes |
+| `read_clip` | A clip's markers, loop, looping; for audio also file, gain (raw + dB text), pitch, warping, warp mode and the modes it allows | yes |
+| `set_clip` | Trim (start/end markers), loop, and on audio clips gain, pitch, warping and warp mode, by name; `warping` goes in its own call; all-or-nothing, one undo step | no |
 | `set_scale` | Set the Set's key (root + scale) and turn on Scale Mode; the melodic generators default to it | no |
 | `create_drum_pattern` | Drum beat in a style (rock, house, hip_hop, trap, reggaeton, breakbeat), plus optional Euclidean layers, on a Drum Rack track or to a `.mid` (destructive) | no |
 | `create_bassline` | Bassline from scale degrees, one per bar (patterns: quarters, eighths, octaves, offbeat, arpeggio), into a slot or a `.mid` (destructive) | no |
@@ -72,6 +75,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `set_device_parameters` | Set several parameters of one device by name, in one undo step; all-or-nothing | no |
 | `create_audio_clip` | Put a library sample (`samples` / `user_library` root + path) or an absolute `file_path` into an empty Session slot of an audio track; reports `warping` and `length_beats` (Live 12.4+) | no |
 | `replace_sample` | Swap the sample of a Simpler, by `device_path` or by Drum Rack `pad_note` (destructive, one undo step; Live 12.4+) | no |
+| `set_simpler` | A Simpler's playback mode (Classic, One-Shot, Slicing), slicing style, beat division, sensitivity, region count, slicing playback mode, warping and warp mode; optional `reverse` / `crop` (destructive with crop); returns `slice_count` and `slice_times_s`; by `device_path` or `pad_note`, one undo step | no |
 | `insert_device` | Add a native Live device (e.g. Limiter, Channel EQ) after the existing ones, or at `index`, without replacing the instrument; `track="main"` is the Main track (Live 12.3+) | no |
 | `delete_device` | Remove one device (effect or instrument) by `device_path`, also inside rack chains; `track="main"` is the Main track (destructive, one undo step) | no |
 | `set_track_mix` | Set a track's volume (dB), pan (-50..50), mute, solo and sends (dB, by return letter); one undo step | no |
@@ -116,7 +120,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 
 ## Limits
 
-- Live Lite allows 8 audio+MIDI tracks. `create_midi_track` checks this before it calls Live; free a track with `delete_track` or reuse one.
+- Live Lite allows 8 audio+MIDI tracks. `create_midi_track` and `create_audio_track` check this before they call Live; free a track with `delete_track` or reuse one.
 - Live Lite allows 16 scenes. `create_scene` checks this before it calls Live; name and reuse empty scenes with `set_label`.
 - Live Lite allows 2 return tracks (A and B). Return and Main track mixing is not supported; `set_track_mix` covers audio, MIDI and group tracks. `insert_device` and `delete_device` are the only tools that take `track="main"`.
 - Volume and send levels are in dB. In `get_set_overview`, `null` means -inf (silent). `set_track_mix` takes numbers only; to silence a track, use `mute`.
@@ -139,14 +143,17 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - `create_drum_pattern` picks each voice's pad by a keyword in the pad name first (e.g. "Kick", "Snare", "Hihat Closed"), then by its General MIDI note (36 kick, 38 snare, 42 closed hat, 46 open hat, ...) if no other voice claims that pad by name. Kits with odd or empty pad names can leave voices unresolved; the result lists them in `missing_voices`.
 - Generators replace the clip in the target slot as one undo step. They never create tracks or load instruments. Melodic clips need an instrument on the track, or they play silent.
 - Samples: the server finds a `samples` name by exact file name in Live's Core Library, `~/Music/Ableton/Factory Packs` and the User Library (a full folder walk per call). A name found twice is refused with the paths; pass one as `file_path`. `user_library` paths are joined onto the User Library folder. Only .wav, .aif, .aiff, .flac, .mp3 and .ogg files are taken.
-- Audio clips go into Session slots only; Arrangement placement is not supported. There is no tool to create an audio track: use one the Set has. Warping is left to Live; there is no warp mode or marker control.
+- Audio clips go into Session slots only; Arrangement placement is not supported. `create_audio_clip` leaves warping to Live; `set_clip` then changes markers, loop, gain, pitch, warping and warp mode. Warp markers are not supported.
+- Live has no API to reverse an audio clip: load the sample into a Simpler and use `set_simpler(reverse=true)`. "Slice to Drum Rack" has no API either: `set_simpler` slices inside one Simpler instead.
+- Turning `warping` off converts an audio clip's markers from beats to seconds (4 beats became 2 s at 120 BPM on 12.4.16), so `set_clip` takes `warping` in its own call; `read_clip` it before setting markers.
+- `set_clip` `gain` is Live's raw 0..1; Live's dB curve is undocumented, so the result shows Live's own `gain_display` text instead of converting.
 - If Live shows a modal dialog, calls time out. A timed-out change may still have run: check `get_set_overview` before retrying.
 
 ## Manual smoke checklist (real Live)
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
 1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11. `doctor` prints no FAIL and exits 0.
-2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 7`.
+2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 8`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
 5. `undo_last` removes only the last tool's change.
@@ -181,6 +188,10 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 33a. `delete_device(track="main", device_path=[0])` removes that Limiter; the result lists the devices left. One `undo_last` brings it back. `device_path=[0, 0, 1]` on a rack with visible chains removes device 1 of chain 0.
 34. On an audio track, `create_audio_clip(root="samples", path=["Atmos Calm 130 bpm.wav"])` plays in time at the Set's tempo; the result shows `warping` and `length_beats`.
 35. On the Garage Kit track, `replace_sample(pad_note=36, root="samples", path=["<a Kick from browse_library samples>"])` changes the kick's sound. One `undo_last` brings the old kick back.
+36. `create_audio_track(name="Loops")` adds an audio track named "Loops". One `undo_last` removes it.
+37. On that track, `create_audio_clip` with a drum loop from the library, then `set_clip(start_marker=4, end_marker=8, loop_start=4, loop_end=8, looping=true, pitch_coarse=-2, warp_mode="Complex")`: the clip plays bar 2 only, 2 semitones down. `read_clip` shows the same values.
+38. Load a Simpler with `load_instrument(kind="simpler")`, `replace_sample` a drum loop into it, then `set_simpler(device_path=[0], playback_mode="Slicing", slicing_style="Beat", slicing_beat_division="1/8")`: `slice_count` > 1. A clip with note 36 plays the first slice, 37 the second.
+39. `set_simpler(device_path=[0], reverse=true)` plays the sample backwards. One `undo_last` restores it.
 
 ## Development
 

@@ -31,6 +31,17 @@ def test_create_track_clip_and_overview(live):
     assert ov["tracks"][0]["clip_slots"][0] == {"slot": 0, "has_clip": True, "name": "", "length": 4}
 
 
+def test_create_audio_track_appends_inserts_and_refuses_bad_index(live):
+    song, app = live
+    assert ops.create_audio_track(song, app, {}) == {"index": 0, "name": "1-Audio"}
+    assert ops.create_audio_track(song, app, {"index": 0, "name": "Loops"}) == {"index": 0, "name": "Loops"}
+    assert [ops._track_type(t) for t in song.tracks] == ["audio", "audio"]
+    for bad in (3, -2, True, "1"):
+        assert _err(ops.create_audio_track, song, app, {"index": bad}).code == "INVALID_ARG", bad
+    assert len(song.tracks) == 2
+    assert ops.OPS["create_audio_track"] == (ops.create_audio_track, True)
+
+
 def test_replace_notes_leaves_only_new(live):
     song, app = live
     song.create_midi_track(-1)
@@ -676,3 +687,120 @@ def test_insert_device_maps_live_error(live):
             ops.insert_device(song, app, args)
         assert e.value.code == "INVALID_ARG"
     assert song.tracks[0].devices == []
+
+
+def test_read_clip_midi_and_audio(audio_set, wav):
+    song, app = audio_set
+    song.tracks[1].clip_slots[0].create_clip(4.0)
+    out = ops.get_clip(song, app, {"track": 1, "slot": 0})
+    assert out == {
+        "track": 1, "slot": 0, "name": "", "length": 4.0, "is_audio": False, "start_marker": 0.0, "end_marker": 4.0,
+        "loop_start": 0.0, "loop_end": 4.0, "looping": True,
+    }
+    ops.create_audio_clip(song, app, {"track": 0, "slot": 0, "file_path": wav})
+    out = ops.get_clip(song, app, {"track": 0, "slot": 0})
+    assert out["is_audio"] is True and out["file"] == wav and out["gain_display"] == "0.0 dB"
+    assert out["warp_mode"] == "Beats" and out["available_warp_modes"] == ["Beats", "Tones", "Texture", "Re-Pitch", "Complex", "Complex Pro"]
+    assert ops.OPS["get_clip"] == (ops.get_clip, False)
+    assert _err(ops.get_clip, song, app, {"track": 0, "slot": 1}).code == "NOT_FOUND"
+
+
+def test_set_clip_audio_sets_every_field(audio_set, wav):
+    song, app = audio_set
+    ops.create_audio_clip(song, app, {"track": 0, "slot": 0, "file_path": wav})
+    args = {
+        "track": 0, "slot": 0, "start_marker": 4, "end_marker": 8, "loop_start": 4, "loop_end": 8, "looping": True,
+        "gain": 0.5, "pitch_coarse": -2, "pitch_fine": 10, "warp_mode": "Complex",
+    }
+    out = ops.set_clip(song, app, args)
+    assert {k: out[k] for k in args if k not in ("track", "slot")} == {
+        **{k: v for k, v in args.items() if k not in ("track", "slot")}, "warp_mode": "Complex",
+    }
+    assert song.tracks[0].clip_slots[0].clip.warp_mode == 4
+    assert ops.set_clip(song, app, {"track": 0, "slot": 0, "warping": False, "looping": False})["warping"] is False
+    out = ops.set_clip(song, app, {"track": 0, "slot": 0, "warping": True, "looping": True})
+    assert (out["warping"], out["looping"]) == (True, True)
+    # Moving right past the old end needs end first; moving back left needs start first.
+    out = ops.set_clip(song, app, {"track": 0, "slot": 0, "start_marker": 10, "end_marker": 12})
+    assert (out["start_marker"], out["end_marker"]) == (10, 12)
+    out = ops.set_clip(song, app, {"track": 0, "slot": 0, "start_marker": 0, "end_marker": 2})
+    assert (out["start_marker"], out["end_marker"]) == (0, 2)
+    assert ops.OPS["set_clip"] == (ops.set_clip, True)
+
+
+def test_set_clip_refusals_change_nothing(audio_set, wav):
+    song, app = audio_set
+    ops.create_audio_clip(song, app, {"track": 0, "slot": 0, "file_path": wav})
+    song.tracks[1].clip_slots[0].create_clip(4.0)
+    audio, midi = song.tracks[0].clip_slots[0].clip, song.tracks[1].clip_slots[0].clip
+    before = (ops.get_clip(song, app, {"track": 0, "slot": 0}), ops.get_clip(song, app, {"track": 1, "slot": 0}))
+    cases = [
+        ({"track": 1, "slot": 0, "loop_end": 2, "gain": 0.5}, "audio clips only"),
+        ({"track": 1, "slot": 0, "warp_mode": "Beats"}, "audio clips only"),
+        ({"track": 0, "slot": 0, "warp_mode": "REX"}, "one of Beats"),
+        ({"track": 0, "slot": 0, "warp_mode": "Fast", "gain": 0.1}, "one of Beats"),
+        ({"track": 0, "slot": 0, "start_marker": 6, "end_marker": 2}, "must be before"),
+        ({"track": 0, "slot": 0, "loop_start": 9}, "must be before"),
+        ({"track": 0, "slot": 0, "gain": 1.5}, "raw 0..1"),
+        ({"track": 0, "slot": 0, "pitch_coarse": 49}, "-48..48"),
+        ({"track": 0, "slot": 0, "pitch_fine": 1.5}, "-50..49"),
+        ({"track": 0, "slot": 0, "looping": 1}, "true or false"),
+        ({"track": 0, "slot": 0, "looping": True, "warping": False}, "unwarped"),
+        ({"track": 0, "slot": 0, "warping": True, "start_marker": 1}, "own set_clip call"),
+        ({"track": 0, "slot": 0, "looping": False, "loop_end": 6}, "need looping true"),
+        ({"track": 0, "slot": 0}, "at least one"),
+    ]
+    for args, text in cases:
+        e = _err(ops.set_clip, song, app, args)
+        assert e.code == "INVALID_ARG" and text in str(e), args
+    assert (ops.get_clip(song, app, {"track": 0, "slot": 0}), ops.get_clip(song, app, {"track": 1, "slot": 0})) == before
+    assert audio.warping is True and midi.loop_end == 4.0
+
+
+def test_set_simpler_by_device_path_and_pad_note(kit_set):
+    song, app = kit_set
+    out = ops.set_simpler(song, app, {
+        "track": 0, "pad_note": 36, "playback_mode": "Slicing", "slicing_style": "Beat", "slicing_beat_division": "1/8",
+        "slicing_sensitivity": 0.7, "slicing_region_count": 16, "slicing_playback_mode": "Poly",
+        "warping": True, "warp_mode": "Complex Pro",
+    })
+    assert out == {
+        "track": 0, "device_path": None, "pad_note": 36, "device": "Kick", "playback_mode": "Slicing",
+        "slicing_playback_mode": "Poly", "file": "/old/kick.wav", "slicing_style": "Beat", "slicing_beat_division": "1/8",
+        "slicing_sensitivity": 0.7, "slicing_region_count": 16, "warping": True, "warp_mode": "Complex Pro",
+        "slice_count": 4, "slice_times_s": [0.0, 0.5, 1.0, 1.5],
+    }
+    kick = song.tracks[0].devices[0].chains[0].devices[0].drum_pads[0].chains[0].devices[0]
+    assert (kick.sample.slicing_beat_division, kick.sample.warp_mode, kick.calls) == (2, 6, [])
+    lead = song.tracks[0].devices[1]
+    lead.replace_sample("/loops/break.wav")
+    out = ops.set_simpler(song, app, {"track": 0, "device_path": [1], "playback_mode": "One-Shot", "reverse": True, "crop": True})
+    assert out["device"] == "Lead" and out["playback_mode"] == "One-Shot" and out["slice_count"] == 4
+    assert lead.calls == ["reverse", "crop"]
+    assert ops.OPS["set_simpler"] == (ops.set_simpler, True)
+
+
+def test_set_simpler_refusals_change_nothing(kit_set):
+    song, app = kit_set
+    kick = song.tracks[0].devices[0].chains[0].devices[0].drum_pads[0].chains[0].devices[0]
+    cases = [
+        ({"pad_note": 36}, "INVALID_ARG", "at least one"),
+        ({"pad_note": 36, "reverse": False}, "INVALID_ARG", "at least one"),
+        ({"pad_note": 36, "playback_mode": "Slice"}, "INVALID_ARG", "Classic, One-Shot, Slicing"),
+        ({"pad_note": 36, "playback_mode": "Slicing", "slicing_beat_division": "1/32"}, "INVALID_ARG", "1/16, 1/16T"),
+        ({"pad_note": 36, "warp_mode": "REX"}, "INVALID_ARG", "Complex, Complex Pro"),
+        ({"pad_note": 36, "slicing_sensitivity": 2}, "INVALID_ARG", "0..1"),
+        ({"pad_note": 36, "slicing_region_count": 0}, "INVALID_ARG", "1..128"),
+        ({"pad_note": 36, "playback_mode": "Slicing", "reverse": "yes"}, "INVALID_ARG", "true or false"),
+        ({"device_path": [1], "reverse": True}, "LIVE_STATE", "replace_sample first"),
+        ({"device_path": [1], "slicing_style": "Beat"}, "LIVE_STATE", "no sample"),
+        ({"device_path": [0], "playback_mode": "Slicing"}, "INVALID_ARG", "not a Simpler"),
+        ({"playback_mode": "Slicing"}, "INVALID_ARG", "not both"),
+    ]
+    for extra, code, text in cases:
+        e = _err(ops.set_simpler, song, app, {"track": 0, **extra})
+        assert e.code == code and text in str(e), extra
+    assert (kick.playback_mode, kick.sample.slicing_beat_division, kick.calls) == (0, 4, [])
+    assert song.tracks[0].devices[1].playback_mode == 0
+    out = ops.set_simpler(song, app, {"track": 0, "device_path": [1], "playback_mode": "Slicing"})  # empty Simpler
+    assert out["playback_mode"] == "Slicing" and out["file"] is None

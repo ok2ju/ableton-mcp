@@ -10,7 +10,7 @@ import sys
 from .bridge import OpError
 
 SCRIPT_VERSION = "0.6.0"
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 
 def hello(song, app, args):
@@ -237,17 +237,25 @@ def create_audio_clip(song, app, args):
     }
 
 
-def create_midi_track(song, app, args):
+def _new_track(song, args, create):
     index = args.get("index", -1)
     count = len(song.tracks)
     if isinstance(index, bool) or not isinstance(index, int) or not -1 <= index <= count:
         raise OpError("INVALID_ARG", f"index must be -1 (end) or 0..{count}")
-    song.create_midi_track(index)
+    create(index)
     new_index = len(song.tracks) - 1 if index == -1 else index
     track = song.tracks[new_index]
     if args.get("name"):
         track.name = str(args["name"])
     return {"index": new_index, "name": track.name}
+
+
+def create_midi_track(song, app, args):
+    return _new_track(song, args, song.create_midi_track)
+
+
+def create_audio_track(song, app, args):
+    return _new_track(song, args, song.create_audio_track)
 
 
 def create_clip(song, app, args):
@@ -284,6 +292,124 @@ def delete_clip(song, app, args):
         raise OpError("NOT_FOUND", "that clip slot is empty")
     slot.delete_clip()
     return {"track": args["track"], "slot": args["slot"]}
+
+
+WARP_MODES = ("Beats", "Tones", "Texture", "Re-Pitch", "Complex", "REX", "Complex Pro")  # Clip.warp_mode 0..6
+AUDIO_CLIP_FIELDS = ("gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode")
+
+
+def _clip(song, args):
+    slot = _slot(song, args)
+    if not slot.has_clip:
+        raise OpError("NOT_FOUND", "that clip slot is empty")
+    return slot.clip
+
+
+def _named(names, i):
+    return names[i] if 0 <= i < len(names) else i  # a value newer than the table stays a number
+
+
+def _warp_name(mode):
+    return _named(WARP_MODES, mode)
+
+
+def _clip_info(args, clip):
+    """Markers and loop are in beats; on an unwarped audio clip they are in seconds."""
+    info = {
+        "track": args["track"], "slot": args["slot"], "name": clip.name, "length": clip.length,
+        "is_audio": not clip.is_midi_clip,
+        "start_marker": clip.start_marker, "end_marker": clip.end_marker,
+        "loop_start": clip.loop_start, "loop_end": clip.loop_end, "looping": bool(clip.looping),
+    }
+    if not clip.is_midi_clip:
+        info.update({
+            "file": clip.file_path, "gain": clip.gain, "gain_display": clip.gain_display_string,
+            "pitch_coarse": clip.pitch_coarse, "pitch_fine": clip.pitch_fine, "warping": bool(clip.warping),
+            "warp_mode": _warp_name(clip.warp_mode),
+            "available_warp_modes": [_warp_name(m) for m in clip.available_warp_modes],
+        })
+    return info
+
+
+def get_clip(song, app, args):
+    return _clip_info(args, _clip(song, args))
+
+
+def _whole(args, key, lo, hi):
+    value = args[key]
+    if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+        raise OpError("INVALID_ARG", f"{key} must be a whole number {lo}..{hi}")
+    return value
+
+
+def _flag(args, key):
+    if not isinstance(args[key], bool):
+        raise OpError("INVALID_ARG", f"{key} must be true or false")
+    return args[key]
+
+
+def _set_range(clip, start_key, end_key, start, end):
+    """Set a checked start < end pair. Live refuses a start at or past the end, so move the end first when moving right."""
+    if start < getattr(clip, end_key):
+        setattr(clip, start_key, start)
+        setattr(clip, end_key, end)
+    else:
+        setattr(clip, end_key, end)
+        setattr(clip, start_key, start)
+
+
+def set_clip(song, app, args):
+    """Change a clip's markers, loop and, on audio clips, gain, pitch and warping. Validates all before setting any."""
+    clip = _clip(song, args)
+    keys = ("start_marker", "end_marker", "loop_start", "loop_end", "looping") + AUDIO_CLIP_FIELDS
+    given = [k for k in keys if args.get(k) is not None]
+    if not given:
+        raise OpError("INVALID_ARG", f"give at least one of {', '.join(keys)}")
+    audio_only = [k for k in given if k in AUDIO_CLIP_FIELDS]
+    if clip.is_midi_clip and audio_only:
+        raise OpError("INVALID_ARG", f"{', '.join(audio_only)} work on audio clips only; this is a MIDI clip")
+    values = {k: _number(args, k) for k in ("start_marker", "end_marker", "loop_start", "loop_end", "gain") if k in given}
+    for k in ("looping", "warping"):
+        if k in given:
+            values[k] = _flag(args, k)
+    if "pitch_coarse" in given:
+        values["pitch_coarse"] = _whole(args, "pitch_coarse", -48, 48)
+    if "pitch_fine" in given:
+        values["pitch_fine"] = _whole(args, "pitch_fine", -50, 49)
+    if "gain" in values and not 0 <= values["gain"] <= 1:
+        raise OpError("INVALID_ARG", "gain is Live's raw 0..1 (read_clip gain_display shows dB)")
+    if "warp_mode" in given:
+        name = args["warp_mode"]
+        available = [_warp_name(m) for m in clip.available_warp_modes]
+        if name not in available:
+            raise OpError("INVALID_ARG", f"warp_mode must be one of {', '.join(map(str, available))} for this clip")
+        values["warp_mode"] = list(clip.available_warp_modes)[available.index(name)]
+    marker_keys = [k for k in ("start_marker", "end_marker", "loop_start", "loop_end") if k in values]
+    if "warping" in values and marker_keys:  # warping switches markers between seconds and beats, and Live applies it later
+        raise OpError("INVALID_ARG", "set warping in its own set_clip call, then read_clip and set the markers")
+    warping = values.get("warping", bool(getattr(clip, "warping", True)))
+    if values.get("looping") and not clip.is_midi_clip and not warping:
+        raise OpError("INVALID_ARG", "Live cannot loop an unwarped audio clip; set warping true first")
+    if not values.get("looping", bool(clip.looping)) and ("loop_start" in values or "loop_end" in values):
+        # On an unlooped clip Live treats loop_start/loop_end as the clip's start and end.
+        raise OpError("INVALID_ARG", "loop_start and loop_end need looping true; use start_marker and end_marker to trim")
+    ranges = []
+    for start_key, end_key in (("start_marker", "end_marker"), ("loop_start", "loop_end")):
+        if start_key in values or end_key in values:
+            start, end = values.get(start_key, getattr(clip, start_key)), values.get(end_key, getattr(clip, end_key))
+            if not start < end:
+                raise OpError("INVALID_ARG", f"{start_key} ({start}) must be before {end_key} ({end})")
+            ranges.append((start_key, end_key, start, end))
+    for k in ("warping", "warp_mode", "gain", "pitch_coarse", "pitch_fine"):
+        if k in values:
+            setattr(clip, k, values[k])
+    if values.get("looping"):  # loop on before writing the loop range, off after it
+        clip.looping = True
+    for r in ranges:
+        _set_range(clip, *r)
+    if values.get("looping") is False:
+        clip.looping = False
+    return _clip_info(args, clip)
 
 
 def get_notes(song, app, args):
@@ -628,17 +754,22 @@ def _pad_simpler(track, note):
     return simpler
 
 
-def replace_sample(song, app, args):
-    """Swap the sample in a Simpler, given by device_path or by the Drum Rack pad note that plays it."""
+def _simpler(song, args):
+    """The Simpler given by device_path or by the Drum Rack pad note that plays it."""
     by_path, by_pad = args.get("device_path") is not None, args.get("pad_note") is not None
     if by_path == by_pad:
         raise OpError("INVALID_ARG", "give device_path or pad_note, not both")
-    if by_path:
-        device = _device(song, args)
-        if device.class_name != SIMPLER_CLASS:
-            raise OpError("INVALID_ARG", f"'{device.name}' is not a Simpler")
-    else:
-        device = _pad_simpler(_track(song, args), args["pad_note"])
+    if by_pad:
+        return _pad_simpler(_track(song, args), args["pad_note"])
+    device = _device(song, args)
+    if device.class_name != SIMPLER_CLASS:
+        raise OpError("INVALID_ARG", f"'{device.name}' is not a Simpler")
+    return device
+
+
+def replace_sample(song, app, args):
+    """Swap the sample in a Simpler, given by device_path or by the Drum Rack pad note that plays it."""
+    device = _simpler(song, args)
     path = _audio_file(args)
     try:
         device.replace_sample(path)
@@ -648,6 +779,74 @@ def replace_sample(song, app, args):
         "track": args["track"], "device_path": args.get("device_path"), "pad_note": args.get("pad_note"),
         "device": device.name, "file": path,
     }
+
+
+PLAYBACK_MODES = ("Classic", "One-Shot", "Slicing")  # SimplerDevice.playback_mode
+SLICING_PLAYBACK_MODES = ("Mono", "Poly", "Thru")  # SimplerDevice.slicing_playback_mode
+SLICING_STYLES = ("Transient", "Beat", "Region", "Manual")  # Sample.slicing_style
+BEAT_DIVISIONS = ("1/16", "1/16T", "1/8", "1/8T", "1/4", "1/4T", "1/2", "1/2T", "1 Bar", "2 Bars", "4 Bars")
+DEVICE_CHOICES = {"playback_mode": PLAYBACK_MODES, "slicing_playback_mode": SLICING_PLAYBACK_MODES}
+SAMPLE_CHOICES = {"slicing_style": SLICING_STYLES, "slicing_beat_division": BEAT_DIVISIONS, "warp_mode": WARP_MODES}
+SAMPLE_FIELDS = tuple(SAMPLE_CHOICES) + ("slicing_sensitivity", "slicing_region_count", "warping")
+
+
+def _simpler_info(args, device):
+    info = {
+        "track": args["track"], "device_path": args.get("device_path"), "pad_note": args.get("pad_note"),
+        "device": device.name, "playback_mode": _named(PLAYBACK_MODES, device.playback_mode),
+        "slicing_playback_mode": _named(SLICING_PLAYBACK_MODES, device.slicing_playback_mode),
+    }
+    sample = device.sample
+    if sample is None:
+        return {**info, "file": None}
+    slices = list(sample.slices)
+    return {
+        **info, "file": sample.file_path,
+        "slicing_style": _named(SLICING_STYLES, sample.slicing_style),
+        "slicing_beat_division": _named(BEAT_DIVISIONS, sample.slicing_beat_division),
+        "slicing_sensitivity": sample.slicing_sensitivity, "slicing_region_count": sample.slicing_region_count,
+        "warping": bool(sample.warping), "warp_mode": _warp_name(sample.warp_mode),
+        "slice_count": len(slices), "slice_times_s": [round(f / sample.sample_rate, 4) for f in slices],
+    }
+
+
+def set_simpler(song, app, args):
+    """Set a Simpler's playback and slicing, then optionally reverse and/or crop its sample. Validates all before setting any."""
+    device = _simpler(song, args)
+    sample = device.sample
+    given = [k for k in (*DEVICE_CHOICES, *SAMPLE_FIELDS) if args.get(k) is not None]
+    actions = [k for k in ("reverse", "crop") if args.get(k) is not None and _flag(args, k)]
+    if not given and not actions:
+        raise OpError("INVALID_ARG", f"give at least one of {', '.join((*DEVICE_CHOICES, *SAMPLE_FIELDS))}, reverse, crop")
+    needs_sample = [k for k in given if k in SAMPLE_FIELDS] + actions
+    if sample is None and needs_sample:
+        raise OpError("LIVE_STATE", f"'{device.name}' has no sample for {', '.join(needs_sample)}; replace_sample first")
+    values = {}
+    for k in given:
+        names = DEVICE_CHOICES.get(k) or SAMPLE_CHOICES.get(k)
+        if names is not None:
+            if args[k] not in names or args[k] == "REX":  # REX is a clip mode only: the Sample API lists 0-4 and 6
+                allowed = [n for n in names if n != "REX"]
+                raise OpError("INVALID_ARG", f"{k} must be one of {', '.join(allowed)}")
+            values[k] = names.index(args[k])
+    if "slicing_sensitivity" in given:
+        values["slicing_sensitivity"] = _number(args, "slicing_sensitivity")
+        if not 0 <= values["slicing_sensitivity"] <= 1:
+            raise OpError("INVALID_ARG", "slicing_sensitivity must be 0..1")
+    if "slicing_region_count" in given:
+        # ponytail: LOM gives no range; 128 is a sanity cap. Live may clamp lower: the result shows what it kept.
+        values["slicing_region_count"] = _whole(args, "slicing_region_count", 1, 128)
+    if "warping" in given:
+        values["warping"] = _flag(args, "warping")
+    for k in DEVICE_CHOICES:
+        if k in values:
+            setattr(device, k, values[k])
+    for k in ("warping", "warp_mode", "slicing_style", "slicing_beat_division", "slicing_sensitivity", "slicing_region_count"):
+        if k in values:
+            setattr(sample, k, values[k])
+    for action in actions:  # after the settings; each writes a new sample file
+        getattr(device, action)()
+    return _simpler_info(args, device)
 
 
 def insert_device(song, app, args):
@@ -772,12 +971,15 @@ OPS = {
     "hello": (hello, False),
     "get_overview": (get_overview, False),
     "create_midi_track": (create_midi_track, True),
+    "create_audio_track": (create_audio_track, True),
     "create_clip": (create_clip, True),
     "delete_track": (delete_track, True),
     "delete_clip": (delete_clip, True),
     "create_scene": (create_scene, True),
     "copy_clip": (copy_clip, True),
     "get_notes": (get_notes, False),
+    "get_clip": (get_clip, False),
+    "set_clip": (set_clip, True),
     "replace_notes": (replace_notes, True),
     "write_clip": (write_clip, True),
     "set_scale": (set_scale, True),
@@ -792,6 +994,7 @@ OPS = {
     "set_parameters": (set_parameters, True),
     "create_audio_clip": (create_audio_clip, True),
     "replace_sample": (replace_sample, True),
+    "set_simpler": (set_simpler, True),
     "insert_device": (insert_device, True),
     "delete_device": (delete_device, True),
     "set_mix": (set_mix, True),

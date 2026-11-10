@@ -13,6 +13,7 @@ TOOL_NAMES = [
     "live_status",
     "get_set_overview",
     "create_midi_track",
+    "create_audio_track",
     "create_midi_clip",
     "delete_track",
     "delete_clip",
@@ -20,6 +21,8 @@ TOOL_NAMES = [
     "copy_clip",
     "write_notes",
     "read_notes",
+    "read_clip",
+    "set_clip",
     "set_scale",
     "create_drum_pattern",
     "create_bassline",
@@ -31,6 +34,7 @@ TOOL_NAMES = [
     "set_device_parameters",
     "create_audio_clip",
     "replace_sample",
+    "set_simpler",
     "insert_device",
     "delete_device",
     "set_track_mix",
@@ -45,10 +49,10 @@ TOOL_NAMES = [
     "vital_read_preset",
 ]
 READ_ONLY_TOOLS = {
-    "live_status", "get_set_overview", "read_notes", "browse_library", "read_device", "vital_read_preset",
+    "live_status", "get_set_overview", "read_notes", "read_clip", "browse_library", "read_device", "vital_read_preset",
 }
 DESTRUCTIVE_TOOLS = {
-    "write_notes", "delete_track", "delete_clip", "replace_sample", "delete_device",
+    "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device",
     "create_drum_pattern", "create_bassline", "create_chord_progression",
 }
 
@@ -196,6 +200,20 @@ def test_create_midi_track_passes_through_below_limit(monkeypatch):
     assert fake.calls[-1] == ("create_midi_track", {"index": -1, "name": "Drums"})
 
 
+def test_create_audio_track_refused_on_lite_at_8_tracks(monkeypatch):
+    tracks = [{"index": i, "name": str(i), "type": "midi"} for i in range(8)]
+    fake = FakeClient({"hello": {"variant": "Lite"}, "get_overview": {"tracks": tracks}})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("create_audio_track", {"name": "Loops"})
+    assert result.is_error is True and "Lite allows 8 tracks" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello", "get_overview"]
+
+    fake.results = {**fake.results, "get_overview": {"tracks": tracks[:1]}, "create_audio_track": {"index": 1, "name": "Loops"}}
+    result = call_tool("create_audio_track", {"name": "Loops", "index": 1})
+    assert result.is_error is False
+    assert fake.calls[-1] == ("create_audio_track", {"index": 1, "name": "Loops"})
+
+
 def test_get_set_overview_with_live_down_is_error(monkeypatch):
     monkeypatch.setattr(server, "client", FakeClient(error=LiveUnavailable(CONTROL_SURFACE_HINT)))
 
@@ -257,8 +275,8 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
     assert "Could not write the MIDI file" in result.content[0].text
 
 
-def test_protocol_version_is_7():
-    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 7
+def test_protocol_version_is_8():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 8
 
 
 PADS_808 = [
@@ -808,3 +826,34 @@ def test_audio_clip_replace_sample_root_schema(monkeypatch, tool):
     monkeypatch.setattr(server, "client", FakeClient({"hello": HELLO_12_4}))
     with pytest.raises(ToolError, match="drums|samples"):  # schema refusal, sent to the client as isError
         call_tool(tool, {"track": 0, "slot": 0, "pad_note": 36, "root": "drums", "path": ["Kick.wav"]})
+
+
+def test_read_clip_and_set_clip_pass_only_given_fields(monkeypatch):
+    fake = FakeClient({"get_clip": {"track": 0}, "set_clip": {"track": 0}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("read_clip", {"track": 0, "slot": 1}).is_error is False
+    assert call_tool("set_clip", {"track": 0, "slot": 1, "start_marker": 4, "looping": False, "warp_mode": "Complex"}).is_error is False
+    assert fake.calls == [
+        ("get_clip", {"track": 0, "slot": 1}),
+        ("set_clip", {"track": 0, "slot": 1, "start_marker": 4, "looping": False, "warp_mode": "Complex"}),
+    ]
+    assert server.WARP_MODES == ops.WARP_MODES
+
+
+def test_set_simpler_passes_only_given_fields_and_matches_ops_choices(monkeypatch):
+    fake = FakeClient({"set_simpler": {"track": 0}})
+    monkeypatch.setattr(server, "client", fake)
+    args = {"track": 0, "pad_note": 36, "playback_mode": "Slicing", "slicing_beat_division": "1/8", "reverse": True}
+    assert call_tool("set_simpler", args).is_error is False
+    assert fake.calls == [("set_simpler", args)]
+    for name in ("PLAYBACK_MODES", "SLICING_PLAYBACK_MODES", "SLICING_STYLES", "BEAT_DIVISIONS"):
+        assert getattr(server, name) == getattr(ops, name), name
+
+
+def test_set_simpler_schema_refuses_rex_and_drops_false_flags(monkeypatch):
+    fake = FakeClient({"set_simpler": {"track": 0}})
+    monkeypatch.setattr(server, "client", fake)
+    with pytest.raises(ToolError):
+        call_tool("set_simpler", {"track": 0, "pad_note": 36, "warp_mode": "REX"})
+    assert call_tool("set_simpler", {"track": 0, "pad_note": 36, "playback_mode": "Classic", "reverse": False}).is_error is False
+    assert fake.calls == [("set_simpler", {"track": 0, "pad_note": 36, "playback_mode": "Classic"})]

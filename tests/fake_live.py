@@ -95,10 +95,36 @@ class Clip:
         self.color = 0
         self.length = length
         self.is_midi_clip = is_midi_clip
-        self.file_path = None  # audio clips only
+        self._start_marker, self._end_marker = 0.0, float(length)
+        self._loop_start, self._loop_end = 0.0, float(length)
+        self.looping = True
+        self.file_path = None  # audio clips only, as are the fields below
         self.warping = not is_midi_clip
+        self.warp_mode = 0
+        self.available_warp_modes = (0, 1, 2, 3, 4, 6)  # no REX for a plain file
+        self.gain = 0.4
+        self.pitch_coarse = 0
+        self.pitch_fine = 0
         self.notes = []
         self._next_id = 1
+
+    # Live refuses a start at or past its end, like the real setters.
+    def _check(self, start, end):
+        if not start < end:
+            raise RuntimeError("Invalid marker position")
+
+    start_marker = property(lambda self: self._start_marker,
+                            lambda self, v: (self._check(v, self._end_marker), setattr(self, "_start_marker", v)))
+    end_marker = property(lambda self: self._end_marker,
+                          lambda self, v: (self._check(self._start_marker, v), setattr(self, "_end_marker", v)))
+    loop_start = property(lambda self: self._loop_start,
+                          lambda self, v: (self._check(v, self._loop_end), setattr(self, "_loop_start", v)))
+    loop_end = property(lambda self: self._loop_end,
+                        lambda self, v: (self._check(self._loop_start, v), setattr(self, "_loop_end", v)))
+
+    @property
+    def gain_display_string(self):
+        return f"{(self.gain - 0.4) * 60:.1f} dB"
 
     def add_new_notes(self, specs):
         assert isinstance(specs, tuple)
@@ -177,13 +203,37 @@ class Track:
 NATIVE_DEVICES = ("Limiter", "Channel EQ", "Reverb", "Simpler")
 
 
+class Sample:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.sample_rate = 44100
+        self.slicing_style = 0
+        self.slicing_beat_division = 4
+        self.slicing_sensitivity = 0.5
+        self.slicing_region_count = 8
+        self.warping = False
+        self.warp_mode = 0
+        self.slices = (0, 22050, 44100, 66150)  # sample frames
+
+
 class SimplerDevice(Device):
     def __init__(self, name="Simpler", file_path=None):
         super().__init__(name, class_name="OriginalSimpler")
         self.file_path = file_path
+        self.sample = Sample(file_path) if file_path else None  # an empty Simpler has no sample
+        self.playback_mode = 0
+        self.slicing_playback_mode = 0
+        self.calls = []  # reverse / crop, in order
 
     def replace_sample(self, file_path):  # 12.4+
         self.file_path = file_path
+        self.sample = Sample(file_path)
+
+    def reverse(self):
+        self.calls.append("reverse")
+
+    def crop(self):
+        self.calls.append("crop")
 
 
 class SongView:
@@ -238,6 +288,13 @@ class Song:
 
     def create_midi_track(self, index):
         track = Track(name=f"{len(self.tracks) + 1}-MIDI", scenes=len(self.scenes))
+        if index == -1:
+            self.tracks.append(track)
+        else:
+            self.tracks.insert(index, track)
+
+    def create_audio_track(self, index):
+        track = Track(name=f"{len(self.tracks) + 1}-Audio", has_midi_input=False, scenes=len(self.scenes))
         if index == -1:
             self.tracks.append(track)
         else:

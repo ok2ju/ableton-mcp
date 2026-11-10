@@ -1,4 +1,4 @@
-"""MCP stdio server: 32 tools. 30 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+"""MCP stdio server: 36 tools. 34 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
 Vital synth presets as files (vital.py) and work without Live.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
@@ -61,6 +61,14 @@ INSTRUMENTS = {
 NOT_IN_LITE = {"operator": "drift", "wavetable": "drift", "analog": "drift", "meld": "drift", "sampler": "simpler"}
 InstrumentKind = Literal[tuple(INSTRUMENTS)]
 SampleRoot = Literal["samples", "user_library"]
+# Clip and Sample warp_mode 0..6 by name; same order as remote_script ops.WARP_MODES.
+WARP_MODES = ("Beats", "Tones", "Texture", "Re-Pitch", "Complex", "REX", "Complex Pro")
+WarpMode = Literal[WARP_MODES]
+# Simpler and Sample choices by name; same order as remote_script ops (a test checks).
+PLAYBACK_MODES = ("Classic", "One-Shot", "Slicing")
+SLICING_PLAYBACK_MODES = ("Mono", "Poly", "Thru")
+SLICING_STYLES = ("Transient", "Beat", "Region", "Manual")
+BEAT_DIVISIONS = ("1/16", "1/16T", "1/8", "1/8T", "1/4", "1/4T", "1/2", "1/2T", "1 Bar", "2 Bars", "4 Bars")
 
 
 @dataclass
@@ -154,9 +162,8 @@ def _hello_and_overview() -> tuple[dict, dict]:
     return client.call("hello", {}), client.call("get_overview", {})
 
 
-@mcp.tool(annotations=WRITES)
-def create_midi_track(index: int = -1, name: str | None = None) -> CallToolResult:
-    """Add a new MIDI track. index -1 puts it at the end. Live Lite allows only 8 audio+MIDI tracks, so reuse an existing empty track when you can."""
+def _create_track(op: str, index: int, name: str | None) -> CallToolResult:
+    """Refuse a ninth audio+MIDI track on Lite before calling Live, then call op."""
     try:
         hello, overview = _hello_and_overview()
     except (LiveUnavailable, LiveTimeout, LiveError) as e:
@@ -170,7 +177,20 @@ def create_midi_track(index: int = -1, name: str | None = None) -> CallToolResul
     args = {"index": index}
     if name is not None:
         args["name"] = name
-    return _call("create_midi_track", args)
+    return _call(op, args)
+
+
+@mcp.tool(annotations=WRITES)
+def create_midi_track(index: int = -1, name: str | None = None) -> CallToolResult:
+    """Add a new MIDI track. index -1 puts it at the end. Live Lite allows only 8 audio+MIDI tracks, so reuse an existing empty track when you can."""
+    return _create_track("create_midi_track", index, name)
+
+
+@mcp.tool(annotations=WRITES)
+def create_audio_track(index: int = -1, name: str | None = None) -> CallToolResult:
+    """Add a new audio track, for audio clips from create_audio_clip. index -1 puts it at the end.
+    Live Lite allows only 8 audio+MIDI tracks, so reuse an existing empty audio track when you can."""
+    return _create_track("create_audio_track", index, name)
 
 
 @mcp.tool(annotations=WRITES)
@@ -234,6 +254,39 @@ def read_notes(track: int, slot: int) -> CallToolResult:
     """Return the clip's length and its notes, in the same shape write_notes takes, sorted by start_time then pitch.
     Mute and probability are not returned, so a read_notes + write_notes round trip resets them."""
     return _call("get_notes", {"track": track, "slot": slot})
+
+
+@mcp.tool(annotations=READ_ONLY)
+def read_clip(track: int, slot: int) -> CallToolResult:
+    """Read a clip's settings: name, length, is_audio, start_marker/end_marker (the part that plays), loop_start/loop_end, looping.
+    Positions are in beats; on an unwarped audio clip they are in seconds. Audio clips also give file, gain (raw 0..1)
+    with gain_display (Live's dB text), pitch_coarse (semitones), pitch_fine (cents), warping, warp_mode and available_warp_modes."""
+    return _call("get_clip", {"track": track, "slot": slot})
+
+
+@mcp.tool(annotations=WRITES)
+def set_clip(
+    track: int, slot: int,
+    start_marker: float | None = None, end_marker: float | None = None,
+    loop_start: float | None = None, loop_end: float | None = None, looping: bool | None = None,
+    gain: float | None = None, pitch_coarse: int | None = None, pitch_fine: int | None = None,
+    warping: bool | None = None, warp_mode: WarpMode | None = None,
+) -> CallToolResult:
+    """Trim, loop, pitch or warp a clip; give only what you want to change, all in one undo step.
+    Positions are in beats (4 = 1 bar in 4/4) as read_clip shows them; each start must be before its end.
+    To play only bar 2 of a loop: start_marker 4, end_marker 8, loop_start 4, loop_end 8, looping true.
+    Audio clips only: gain raw 0..1 (check gain_display in the result), pitch_coarse -48..48 semitones,
+    pitch_fine -50..49 cents, warping (follow the Set's tempo; set it alone, as it changes the markers' unit), warp_mode from available_warp_modes
+    (Beats for drums, Complex for full mixes, Re-Pitch changes pitch with speed). An unwarped audio clip cannot loop,
+    and loop_start/loop_end need looping true.
+    If any value is invalid, nothing changes. Returns the clip as read_clip does. Reversing a clip is not possible:
+    load the sample into a Simpler and use set_simpler reverse."""
+    fields = {
+        "start_marker": start_marker, "end_marker": end_marker, "loop_start": loop_start, "loop_end": loop_end,
+        "looping": looping, "gain": gain, "pitch_coarse": pitch_coarse, "pitch_fine": pitch_fine,
+        "warping": warping, "warp_mode": warp_mode,
+    }
+    return _call("set_clip", {"track": track, "slot": slot, **{k: v for k, v in fields.items() if v is not None}})
 
 
 @mcp.tool(annotations=WRITES)
@@ -531,6 +584,38 @@ def replace_sample(
     if isinstance(file, CallToolResult):
         return file
     return _call("replace_sample", {"track": track, "device_path": device_path, "pad_note": pad_note, "file_path": file})
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def set_simpler(
+    track: int, device_path: list[int] | None = None, pad_note: int | None = None,
+    playback_mode: Literal[PLAYBACK_MODES] | None = None,
+    slicing_style: Literal[SLICING_STYLES] | None = None,
+    slicing_beat_division: Literal[BEAT_DIVISIONS] | None = None,
+    slicing_sensitivity: float | None = None,
+    slicing_region_count: int | None = None,
+    slicing_playback_mode: Literal[SLICING_PLAYBACK_MODES] | None = None,
+    warping: bool | None = None,
+    warp_mode: Literal[tuple(m for m in WARP_MODES if m != "REX")] | None = None,
+    reverse: bool = False,
+    crop: bool = False,
+) -> CallToolResult:
+    """Set how a Simpler plays its sample, all in one undo step. Pick the Simpler as in replace_sample: device_path or pad_note, not both.
+    playback_mode: Classic (plays the sample pitched by the key), One-Shot (plays it once, whole), Slicing (cuts it into slices, one per note).
+    To chop a drum loop: playback_mode "Slicing", slicing_style "Beat", slicing_beat_division "1/8"; then write_notes from note 36 (C1)
+    upward, one note per slice (36 plays slice 1, 37 slice 2, ...). slicing_style Transient cuts at hits (slicing_sensitivity 0..1: higher gives more slices),
+    Region cuts into slicing_region_count equal parts. slicing_playback_mode: Mono (one slice at a time), Poly, Thru (plays on past the slice end).
+    warping and warp_mode make the sample follow the Set's tempo. reverse plays the sample backwards; crop drops the audio outside the
+    start and end (destructive); both write a new sample file and run after the settings. If any value is invalid, nothing changes.
+    Returns the settings plus slice_count and slice_times_s (seconds from the sample start); outside Slicing mode Live reports no slices.
+    One undo_last undoes the whole call, reverse and crop included."""
+    fields = {
+        "device_path": device_path, "pad_note": pad_note, "playback_mode": playback_mode, "slicing_style": slicing_style,
+        "slicing_beat_division": slicing_beat_division, "slicing_sensitivity": slicing_sensitivity,
+        "slicing_region_count": slicing_region_count, "slicing_playback_mode": slicing_playback_mode,
+        "warping": warping, "warp_mode": warp_mode, "reverse": reverse or None, "crop": crop or None,
+    }
+    return _call("set_simpler", {"track": track, **{k: v for k, v in fields.items() if v is not None}})
 
 
 @mcp.tool(annotations=WRITES)

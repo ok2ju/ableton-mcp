@@ -1,5 +1,6 @@
-"""MCP stdio server: 36 tools. 34 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
-Vital synth presets as files (vital.py) and work without Live.
+"""MCP stdio server: 37 tools. 34 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+Vital synth presets as files (vital.py) and 1 lists a folder of the user's samples (samples.py); those 3 work
+without Live.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
@@ -543,6 +544,19 @@ def _needs(feature: str, version: str) -> CallToolResult | None:
 def _sample_file(root: str | None, path: list[str] | None, file_path: str | None) -> str | CallToolResult:
     try:
         return str(samples.resolve(root, path, file_path))
+    except ValueError as e:
+        return _error(str(e))
+
+
+@mcp.tool(annotations=READ_ONLY)
+def list_samples(folder: str, limit: int = 200) -> CallToolResult:
+    """List the audio files under a folder of the user's samples, recursively; works without Live.
+    folder: an absolute path. Returns total (all files found) and files (sorted by path, at most limit), each with
+    path, name, duration_s (WAV only, else null) and guesses from the filename: role (kick, snare, clap, hat, perc,
+    bass, vocal, pad, chord, lead, fx or null), kind (loop, one_shot or unknown), bpm and key (null when the name
+    does not say). Pass a file's path as file_path to create_audio_clip or replace_sample."""
+    try:
+        return _ok(samples.scan(folder, limit))
     except ValueError as e:
         return _error(str(e))
 

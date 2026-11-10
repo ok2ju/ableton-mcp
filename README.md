@@ -47,7 +47,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 36 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 37 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -73,6 +73,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `load_instrument` | Load an instrument by kind (drift, simpler, impulse, drum_rack, ...), optionally a preset by name; refuses non-Lite kinds on Lite | no |
 | `read_device` | A device's parameters (name, raw value, min/max, Live's `display` text, switch `items`) and a rack's chains; `device_path` reaches into racks | yes |
 | `set_device_parameters` | Set several parameters of one device by name, in one undo step; all-or-nothing | no |
+| `list_samples` | Audio files under an absolute folder, recursively (hidden and `.asd` files skipped), sorted by path and capped by `limit`, with `total`; each with `duration_s` (PCM WAV only, else null) and filename guesses at `role`, `kind` (loop, one_shot, unknown), `bpm` and `key`; works without Live | yes |
 | `create_audio_clip` | Put a library sample (`samples` / `user_library` root + path) or an absolute `file_path` into an empty Session slot of an audio track; reports `warping` and `length_beats` (Live 12.4+) | no |
 | `replace_sample` | Swap the sample of a Simpler, by `device_path` or by Drum Rack `pad_note` (destructive, one undo step; Live 12.4+) | no |
 | `set_simpler` | A Simpler's playback mode (Classic, One-Shot, Slicing), slicing style, beat division, sensitivity, region count, slicing playback mode, warping and warp mode; optional `reverse` / `crop` (destructive with crop); returns `slice_count` and `slice_times_s`; by `device_path` or `pad_note`, one undo step | no |

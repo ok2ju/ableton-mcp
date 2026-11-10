@@ -32,6 +32,7 @@ TOOL_NAMES = [
     "load_instrument",
     "read_device",
     "set_device_parameters",
+    "list_samples",
     "create_audio_clip",
     "replace_sample",
     "set_simpler",
@@ -50,6 +51,7 @@ TOOL_NAMES = [
 ]
 READ_ONLY_TOOLS = {
     "live_status", "get_set_overview", "read_notes", "read_clip", "browse_library", "read_device", "vital_read_preset",
+    "list_samples",
 }
 DESTRUCTIVE_TOOLS = {
     "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device",
@@ -714,6 +716,17 @@ def test_vital_read_preset(vital_dir):
     junk = call_tool("vital_read_preset", {"name_or_path": "junk"})
     assert junk.is_error is True
     assert "not a Vital preset" in junk.content[0].text
+
+
+def test_list_samples(tmp_path):
+    (tmp_path / "Kick.wav").write_bytes(b"RIFF")
+    result = call_tool("list_samples", {"folder": str(tmp_path)})
+    assert result.is_error is False
+    assert result.structured_content["total"] == 1
+
+    for folder in ("Samples", str(tmp_path / "missing"), str(tmp_path / "Kick.wav")):
+        bad = call_tool("list_samples", {"folder": folder})
+        assert bad.is_error is True, folder
 
 
 def test_vital_create_preset_without_standalone(vital_dir, monkeypatch, tmp_path):

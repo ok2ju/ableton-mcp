@@ -4,7 +4,7 @@ sample's tempo and key (hearing.py, optional librosa extra); those 4 work withou
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
-Server instructions (sent once per session), 7 guided-lesson prompts and 2 read-only resources
+Server instructions (sent once per session), 8 prompts (6 guided lessons, explain-my-set, make-track-from-samples) and 2 read-only resources
 (live://capabilities, live://set/overview) are registered below; their texts live in lessons.py.
 Tests replace the module global `client` with a fake.
 """
@@ -918,6 +918,12 @@ def lesson_song_structure() -> str:
 def explain_my_set() -> str:
     """Describe the open Set in plain words (tempo, key, each track's role) without changing it."""
     return lessons.EXPLAIN_MY_SET
+
+
+@mcp.prompt(name="make-track-from-samples", title="Make a track from my samples")
+def make_track_from_samples() -> str:
+    """Turn a folder of samples into a 2-4 minute arranged track: tempo, key, drums, loops, sections, build-up."""
+    return lessons.MAKE_TRACK_FROM_SAMPLES
 
 
 def main():

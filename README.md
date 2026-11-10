@@ -119,8 +119,22 @@ Guided lessons are MCP prompts. In Claude Code, type `/` and pick one. They take
 | `/ableton:lesson-melody` | A short melody over the chords |
 | `/ableton:lesson-song-structure` | Song sections as scenes, played in order |
 | `/ableton:explain-my-set` | A plain-words tour of your Set; changes nothing |
+| `/ableton:make-track-from-samples` | A 2-4 minute arranged track from your own sample folder |
 
 The lessons follow the chapter order of Ableton's [Learning Music](https://learningmusic.ableton.com) and link each chapter for hands-on practice. The site states no licence, so the lesson texts are our own words and only link to it.
+
+### Full track from your samples
+
+`/ableton:make-track-from-samples` (or asking "make a track from my samples") asks for an absolute sample folder and a genre, then:
+
+1. Scans the folder with `list_samples`, and runs `analyze_sample` on loops whose names give no BPM or key. Without the `hearing` extra it passes on the install hint and goes on from the filename guesses.
+2. Sets the tempo and key from the main loop with `set_tempo` and `set_scale`.
+3. Puts the drum one-shots in one Drum Rack (`load_instrument`, `replace_sample` per pad, `create_drum_pattern`), and each loop on an audio track (`create_audio_track`, `create_audio_clip`). Loops are warped and looped with `set_clip` so their length divides each section. It stays within Lite's 8 tracks and 16 scenes.
+4. Builds scenes Intro, Build, Drop, Break and Outro, and varies them with `create_scene` copies, `copy_clip`, `delete_clip` and `set_clip`.
+5. Adds a build-up to the Build clips with `set_clip_envelope`: a volume rise, or an Auto Filter cutoff sweep (`insert_device`, `read_device`).
+6. Lays out Intro, Build, Drop, Break, Drop, Outro with `arrange_scenes`, sized for 2-4 minutes (minutes = bars x 4 / BPM), and plays it with `play_arrangement`.
+
+It adds no locators. Save with Cmd+S and render with File > Export Audio/Video in Live.
 
 Two read-only resources return the same JSON as their tools. Attach one to a message with `@`:
 
@@ -190,7 +204,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 23. `set_device_parameters` on two Drift parameters: the returned `display` matches Live's UI. One `undo_last` restores both.
 24. Lite only: "use Operator for the lead" gets the refusal, and the agent loads Drift instead.
 25. `uv run python -c "import asyncio; from ableton_mcp import server; print(asyncio.run(server.mcp.read_resource('live://capabilities')))"` shows your Live version, edition and `limits` (`"audio_midi_tracks": 8` on Lite).
-26. In Claude Code, after `/mcp` reconnect: typing `/lesson` lists the six `/ableton:lesson-*` commands, `/ableton:explain-my-set` is there, and typing `@ableton:` offers both `live://` resources.
+26. In Claude Code, after `/mcp` reconnect: typing `/lesson` lists the six `/ableton:lesson-*` commands, `/ableton:explain-my-set` and `/ableton:make-track-from-samples` are there, and typing `@ableton:` offers both `live://` resources.
 27. `/ableton:lesson-first-beat` builds a playing beat step by step, explains the drum roles and tempo, links the Beats chapter, and ends with one Cmd+S reminder and the next lesson's command. `/ableton:explain-my-set` makes no write tool call.
 28. In a fresh session with no lesson, "add an open hi-hat on the off-beats" gets a plain-words summary of the change and one save reminder at the end, not one after each tool call.
 29. With the Vital app closed, ask Claude Code for "a warm detuned supersaw pad". Vital opens with the new preset, and its values match the tool call. With Vital open, the same request starts no second instance, and the preset is in the browser under User. In Live, Vital loaded with `load_from_library` plays the preset with notes from `create_chord_progression`.
@@ -210,6 +224,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 42. With the `hearing` extra, `analyze_sample(file_path="<a loop whose name says its BPM>")` gives that BPM as `bpm`, `bpm_half` or `bpm_double` (no Live needed).
 43. Live 12.4 Lite: `live_status` shows `features.clip_envelopes: true`. On a 16-beat Session clip, `set_clip_envelope(track=0, slot=0, parameter="volume", points=[{"time":0,"value":-24},{"time":16,"value":0}])` returns `steps: 64`; the clip's Envelopes box shows a stepped volume rise over 4 bars, and it is audible when the clip plays. One `undo_last` removes it.
 44. Live 12.4 Lite: on a track with an Auto Filter after its instrument and a 16-beat Build clip in slot 0, `read_device` on the Auto Filter shows the cutoff name and range (`Frequency`). `set_clip_envelope(track=0, slot=0, device_path=[1], parameter="Frequency", points=[{"time":0,"value":<near min>},{"time":16,"value":<max>}])` returns `steps: 64`; the clip's Envelopes box shows the Auto Filter cutoff rising, and the sweep is audible when the clip plays. A misspelled name returns a "did you mean" error. One `undo_last` removes it.
+45. Live 12.4 Lite: `/ableton:make-track-from-samples` on your own sample folder gives a 2-4 minute Arrangement with named sections that plays from start to end, then reminds you once of Cmd+S and File > Export Audio/Video.
 
 ## Development
 

@@ -600,6 +600,7 @@ PROMPT_NAMES = [
     "lesson-melody",
     "lesson-song-structure",
     "explain-my-set",
+    "make-track-from-samples",
 ]
 
 
@@ -634,6 +635,14 @@ def test_explain_my_set_names_no_write_tool():
         assert forbidden not in text
     named = set(re.findall(r"`([a-z]+(?:_[a-z]+)+)`", text))
     assert named and named <= READ_ONLY_TOOLS, named - READ_ONLY_TOOLS
+
+
+def test_make_track_prompt_arranges_plays_and_reminds():
+    text = prompt_text("make-track-from-samples")
+    for needed in ("`list_samples`", "`analyze_sample`", "`arrange_scenes`", "`play_arrangement`",
+                   "`set_clip_envelope`", "minutes = bars x 4 / BPM", "locators", "Cmd+S", "Export Audio/Video"):
+        assert needed in text, needed
+    assert "make-track-from-samples" in server.mcp.instructions
 
 
 def test_texts_name_only_real_tools():

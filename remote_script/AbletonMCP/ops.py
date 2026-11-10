@@ -753,7 +753,8 @@ def play_arrangement(song, app, args):
     song.back_to_arranger = False
     song.current_song_time = (bar - 1) * 4.0  # 4/4, as the generators assume
     song.start_playing()
-    return {"from_bar": bar, "song_time": song.current_song_time, "is_playing": True}
+    # Report the requested position: Live 12.4 can return the old current_song_time until its next tick.
+    return {"from_bar": bar, "song_time": (bar - 1) * 4.0, "is_playing": True}
 
 
 MAX_SECTION_BARS = 256

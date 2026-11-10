@@ -561,9 +561,10 @@ def _sample_file(root: str | None, path: list[str] | None, file_path: str | None
 
 
 @mcp.tool(annotations=READ_ONLY)
-def list_samples(folder: str, limit: int = 200) -> CallToolResult:
+def list_samples(folder: str, limit: int = 100) -> CallToolResult:
     """List the audio files under a folder of the user's samples, recursively; works without Live.
-    folder: an absolute path. Returns total (all files found) and files (sorted by path, at most limit), each with
+    folder: an absolute path. Returns total (all files found) and files (sorted by path, at most limit, default 100; when total is larger,
+scan a subfolder rather than raising limit, as each file adds about 230 characters), each with
     path, name, duration_s (PCM WAV, or any format with the hearing extra; else null) and guesses from the filename: role (kick, snare, clap, hat, perc,
     bass, vocal, pad, chord, lead, fx or null), kind (loop, one_shot or unknown), bpm and key (null when the name
     does not say). Pass a file's path as file_path to create_audio_clip or replace_sample."""

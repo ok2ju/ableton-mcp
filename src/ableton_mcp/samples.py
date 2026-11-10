@@ -125,6 +125,8 @@ def describe(path: Path) -> dict:
     """A file's path, name and duration, plus guesses from its filename at bpm, key, role and kind."""
     stem = path.stem
     words = re.findall(r"[a-z]+|\d+", stem.lower())
+    # "Drum and Bass" names a genre, not a bass part.
+    role_words = re.findall(r"[a-z]+|\d+", re.sub(r"drum\s*(?:and|n|&)\s*bass", " ", stem.lower()))
     bpm = BPM_RE.search(stem)
     duration = _duration(path)
     if "loop" in words or "loops" in words or bpm:
@@ -139,12 +141,12 @@ def describe(path: Path) -> dict:
         "duration_s": duration,
         "bpm": int(bpm.group(1)) if bpm else None,
         "key": _key(stem),
-        "role": next((ROLE_WORDS[w] for w in words if w in ROLE_WORDS), None),
+        "role": next((ROLE_WORDS[w] for w in role_words if w in ROLE_WORDS), None),
         "kind": kind,
     }
 
 
-def scan(folder: str, limit: int = 200) -> dict:
+def scan(folder: str, limit: int = 100) -> dict:
     """Audio files under an absolute folder, recursively, sorted by path. Skips hidden files and folders and
     Live's .asd files. Returns {total, files} with at most `limit` files. Raises ValueError with advice."""
     top = Path(folder).expanduser()

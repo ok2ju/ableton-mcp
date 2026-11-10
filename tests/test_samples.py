@@ -1,4 +1,5 @@
 import wave
+from pathlib import Path
 
 import pytest
 
@@ -154,3 +155,8 @@ def test_duration_from_soundfile_for_non_wav(tmp_path):
     soundfile = pytest.importorskip("soundfile")  # comes with the hearing extra
     soundfile.write(str(tmp_path / "tone.flac"), [0.0] * 22050, 44100)
     assert samples._duration(tmp_path / "tone.flac") == 0.5
+
+
+def test_drum_and_bass_is_a_genre_not_a_bass_role():
+    assert samples.describe(Path("Drum and Bass Rolling 170 bpm.wav"))["role"] is None
+    assert samples.describe(Path("DnB Sub Bass 174 bpm.wav"))["role"] == "bass"

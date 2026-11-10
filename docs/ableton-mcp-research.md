@@ -272,6 +272,13 @@ Session View is the better fit for a beginner tool. Its slots, scenes, `create_c
 
 This project builds in Session View and then copies scenes to the Arrangement with `arrange_scenes`: `Track.duplicate_clip_to_arrangement` per repeat, `Track.arrangement_clips` to check the Arrangement is empty and `Track.delete_clip(clip)` for `replace=true` ([LOM: Track](https://docs.cycling74.com/apiref/lom/track/)). An Arrangement clip's `end_time` is read-only, so a clip that does not divide its section is refused instead of trimmed.
 
+Checked 2026-11-10 on Live 12.4.16 Lite, with two Drift tracks, scenes "Intro" (4 bars) and "Drop" (8 bars), and `arrange_scenes([{0,4},{1,8}])`:
+- **Envelopes survive.** The Arrangement copies keep their Session clip envelopes. A volume rise from `set_clip_envelope` and an Auto Filter `Frequency` sweep both play in the Arrangement as they did in Session.
+- **Placement.** The call placed 5 clips (12 bars) in 0.30 s. A second call without `replace` was refused, and one `undo` removed the whole layout.
+- **Locators do not work this way.** Setting `current_song_time` and then calling `set_or_delete_cue()` in the same op created no cue point: the result had 0 locators. The likely cause is that the playback position does not follow `current_song_time` until Live's next tick, so both toggles hit one position (or none). Locators were therefore dropped, as the plan's fallback said, and `arrange_scenes` returns section start bars only. A possible later fix is one op per locator, so Live ticks in between. That fix is untested.
+- **Song time read-back.** Reading `current_song_time` straight after setting it in `play_arrangement` once returned the old value (16.0 instead of 0.0). Playback still started at the requested bar the second time it was checked by ear.
+- **Envelope speed.** `set_clip_envelope` wrote 1024 steps (a 64-bar volume ramp) in 0.46 s, inside the 1 s budget in the plan's risks.
+
 ### 3.6 What the LOM cannot do
 
 | Not possible via LOM | Evidence | Workaround |

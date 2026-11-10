@@ -428,6 +428,22 @@ def test_set_envelope_replaces_and_empty_points_only_clear(live):
     assert clip.cleared == [m.volume, m.volume] and clip.envelopes == {}
 
 
+def test_set_envelope_ramp_off_the_sixteenth_grid(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "pan", "points": [{"time": 0, "value": 0}, {"time": 1.1, "value": 11}]})
+    steps = clip.envelopes[m.panning].steps
+    assert [(t, round(d, 6)) for t, d, _ in steps[:5]] == [(0.0, 0.25), (0.25, 0.25), (0.5, 0.25), (0.75, 0.25), (1.0, 0.1)]
+
+
+def test_set_envelope_refuses_unwarped_audio(scenes_set):
+    song, app = scenes_set
+    clip = song.tracks[1].clip_slots[1].clip
+    clip.warping = False
+    e = _err(ops.set_envelope, song, app, {"track": 1, "slot": 1, "parameter": "volume", "points": []})
+    assert e.code == "LIVE_STATE" and "unwarped" in str(e) and clip.cleared == []
+
+
 def test_set_envelope_refusals_write_nothing(live):
     song, app = live
     m, clip = _envelope_clip(song)
@@ -748,6 +764,16 @@ def test_arrange_refuses_a_full_arrangement_unless_replace(scenes_set):
     ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 1}], "replace": True})
     assert old not in song.tracks[1].arrangement_clips
     assert _placed(song.tracks[0]) == [(0.0, 4.0)] and _placed(song.tracks[1]) == []
+
+
+def test_arrange_replace_with_a_bad_section_keeps_old_clips(scenes_set):
+    song, app = scenes_set
+    old = Clip(4.0)
+    song.tracks[1].arrangement_clips = [old]
+    for sections in ([{"scene": 0, "bars": 1}, {"scene": 9, "bars": 1}], [{"scene": 0, "bars": 256}] * 1541):
+        e = _err(ops.arrange, song, app, {"sections": sections, "replace": True})  # 1541 x 256 bars passes MAX_BAR
+        assert "no scene 9" in str(e) or "Arrangement ends at bar" in str(e)
+        assert song.tracks[1].arrangement_clips == [old] and song.tracks[0].arrangement_clips == []
 
 
 @pytest.fixture

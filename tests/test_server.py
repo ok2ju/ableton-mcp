@@ -845,19 +845,18 @@ def test_audio_clip_bad_sample_never_reaches_live(monkeypatch, tmp_path):
     assert [op for op, _ in fake.calls] == ["hello"]
 
 
-def test_play_arrangement_refused_without_feature(monkeypatch):
-    fake = FakeClient({"hello": HELLO_12_1})
+def test_play_arrangement_not_gated(monkeypatch):
+    fake = FakeClient({"play_arrangement": {"from_bar": 5}})
     monkeypatch.setattr(server, "client", fake)
-    result = call_tool("play_arrangement", {"from_bar": 5})
-    assert result.is_error is True and "needs Live 12.4+" in result.content[0].text
-    assert [op for op, _ in fake.calls] == ["hello"]
+    assert call_tool("play_arrangement", {"from_bar": 5}).is_error is False
+    assert fake.calls == [("play_arrangement", {"from_bar": 5})]
 
 
 def test_play_arrangement_sends_bar(monkeypatch):
-    fake = FakeClient({"hello": HELLO_12_4, "play_arrangement": {"from_bar": 1}})
+    fake = FakeClient({"play_arrangement": {"from_bar": 1}})
     monkeypatch.setattr(server, "client", fake)
     assert call_tool("play_arrangement").is_error is False
-    assert fake.calls == [("hello", {}), ("play_arrangement", {"from_bar": 1})]
+    assert fake.calls == [("play_arrangement", {"from_bar": 1})]
 
 
 SECTIONS = [{"scene": 0, "bars": 4}, {"scene": 1, "bars": 8}]

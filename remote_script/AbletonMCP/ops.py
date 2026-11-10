@@ -592,6 +592,9 @@ def set_envelope(song, app, args):
     if not slot.has_clip:
         raise OpError("NOT_FOUND", "that clip slot is empty")
     clip = slot.clip
+    if not clip.is_midi_clip and not clip.warping:
+        raise OpError("LIVE_STATE", "the audio clip is unwarped, so its length is in seconds, not beats; "
+                      "turn warping on with set_clip first")
     param, unit = _envelope_target(song, args)
     points = args["points"]
     if not isinstance(points, list):

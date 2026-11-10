@@ -706,7 +706,7 @@ def set_clip_envelope(
 ) -> CallToolResult:
     """Automate the track's own volume, pan, a send, or a device parameter inside one Session clip,
     e.g. a volume rise or a filter cutoff sweep over a Build clip.
-    Without device_path, parameter is "volume" or "send A", "send B", ... (values in dB, max +6), or "pan"
+    Without device_path, parameter is "volume" or "send A", "send B", ... (values in dB; volume max +6, sends max 0), or "pan"
     (-50 = 50L .. 50 = 50R). With device_path (a device on this same track, as in read_device), parameter is that
     device's parameter name as read_device shows it (case ignored), and values are raw, between the min and max
     read_device shows (not units); a switch (quantized) parameter takes one of its items or a whole number.
@@ -714,7 +714,7 @@ def set_clip_envelope(
     e.g. [{"time": 0, "value": -24}, {"time": 16, "value": 0}]. Between two points the value ramps in 1/16-note
     steps (linear in dB, pan or raw units; a switch holds each point's item until the next point); after the last
     point it holds to the clip end; before the first point it stays at the control's current value.
-    Replaces that control's envelope in the clip; points=[] only clears it. All-or-nothing, one undo step.
+    Replaces that control's envelope in the clip; points=[] only clears it. Unwarped audio clips are refused (their length is in seconds). All-or-nothing, one undo step.
     The envelope plays whenever the clip plays; arrange_scenes copies the clip to the Arrangement. Needs Live 12.4+."""
     refused = _needs("clip_envelopes", "12.4")
     if refused:
@@ -783,9 +783,7 @@ def arrange_scenes(sections: list[Section], replace: bool = False) -> CallToolRe
 def play_arrangement(from_bar: int = 1) -> CallToolResult:
     """Play the Arrangement (the timeline) from this bar; 1 is the start. Stops every Session clip first,
     because playing Session clips override the Arrangement. Assumes 4/4. Not an undo step."""
-    refused = _needs("arrangement", "12.4")
-    if refused:
-        return refused
+    # Not gated: stop_all_clips, back_to_arranger, current_song_time and start_playing predate Live 12.
     return _call("play_arrangement", {"from_bar": from_bar})
 
 

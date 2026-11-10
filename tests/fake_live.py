@@ -187,6 +187,9 @@ class Track:
     def create_midi_clip(self, start_time, length):  # arrangement, 12.1.10+
         raise NotImplementedError
 
+    def duplicate_clip_to_arrangement(self, clip, destination_time):  # hello's `arrangement` feature
+        raise NotImplementedError
+
     def insert_device(self, device_name, target_index=None):  # 12.3+, native devices only
         if device_name not in NATIVE_DEVICES:
             raise RuntimeError(f"Device {device_name} not available.")  # Live 12.4.16's text, ends with "."
@@ -258,6 +261,9 @@ class Song:
         self._scale_name = "Major"
         self.scale_mode = False
         self.is_playing = False
+        self.clips_stopped = False
+        self.back_to_arranger = True
+        self.current_song_time = 0.0
         self.tracks = []
         self.scenes = [Scene() for _ in range(8)]
         self.return_tracks = [Track("A-Reverb", has_midi_input=False, scenes=0), Track("B-Delay", has_midi_input=False, scenes=0)]
@@ -320,6 +326,12 @@ class Song:
 
     def stop_playing(self):
         self.is_playing = False
+
+    def start_playing(self):
+        self.is_playing = True
+
+    def stop_all_clips(self):
+        self.clips_stopped = True
 
     def undo(self):
         self.undo_count += 1

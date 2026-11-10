@@ -43,6 +43,7 @@ TOOL_NAMES = [
     "play_clip",
     "fire_scene",
     "stop",
+    "play_arrangement",
     "undo_last",
     "write_midi_file",
     "vital_create_preset",
@@ -275,8 +276,8 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
     assert "Could not write the MIDI file" in result.content[0].text
 
 
-def test_protocol_version_is_8():
-    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 8
+def test_protocol_version_is_9():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 9
 
 
 PADS_808 = [
@@ -748,10 +749,10 @@ def test_vital_create_preset_white_noise_sample(vital_dir):
 
 HELLO_12_4 = {
     "protocol_version": server.PROTOCOL_VERSION, "live_version": "12.4.16", "variant": "Lite",
-    "features": {"insert_device": True, "replace_sample": True, "audio_clip": True},
+    "features": {"insert_device": True, "replace_sample": True, "audio_clip": True, "arrangement": True},
 }
 HELLO_12_1 = {**HELLO_12_4, "live_version": "12.1.10",
-              "features": {"insert_device": False, "replace_sample": False, "audio_clip": False}}
+              "features": {"insert_device": False, "replace_sample": False, "audio_clip": False, "arrangement": False}}
 SAMPLE_TOOLS = [
     ("create_audio_clip", {"track": 0, "slot": 0}),
     ("replace_sample", {"track": 0, "pad_note": 36}),
@@ -801,6 +802,21 @@ def test_audio_clip_bad_sample_never_reaches_live(monkeypatch, tmp_path):
     result = call_tool("create_audio_clip", {"track": 0, "slot": 0, "file_path": str(tmp_path / "nope.wav")})
     assert result.is_error is True and "No file" in result.content[0].text
     assert [op for op, _ in fake.calls] == ["hello"]
+
+
+def test_play_arrangement_refused_without_feature(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_1})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("play_arrangement", {"from_bar": 5})
+    assert result.is_error is True and "needs Live 12.4+" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+
+
+def test_play_arrangement_sends_bar(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_4, "play_arrangement": {"from_bar": 1}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("play_arrangement").is_error is False
+    assert fake.calls == [("hello", {}), ("play_arrangement", {"from_bar": 1})]
 
 
 def test_insert_device_main(monkeypatch):

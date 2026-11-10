@@ -1,4 +1,4 @@
-"""MCP stdio server: 36 tools. 34 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+"""MCP stdio server: 37 tools. 35 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
 Vital synth presets as files (vital.py) and work without Live.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
@@ -692,6 +692,16 @@ def fire_scene(scene: int) -> CallToolResult:
 def stop() -> CallToolResult:
     """Stop playback."""
     return _call("stop")
+
+
+@mcp.tool(annotations=WRITES)
+def play_arrangement(from_bar: int = 1) -> CallToolResult:
+    """Play the Arrangement (the timeline) from this bar; 1 is the start. Stops every Session clip first,
+    because playing Session clips override the Arrangement. Assumes 4/4. Not an undo step."""
+    refused = _needs("arrangement", "12.4")
+    if refused:
+        return refused
+    return _call("play_arrangement", {"from_bar": from_bar})
 
 
 @mcp.tool(annotations=WRITES)

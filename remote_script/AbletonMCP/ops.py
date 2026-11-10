@@ -9,8 +9,8 @@ import sys
 
 from .bridge import OpError
 
-SCRIPT_VERSION = "0.6.0"
-PROTOCOL_VERSION = 8
+SCRIPT_VERSION = "0.7.0"
+PROTOCOL_VERSION = 9
 
 
 def hello(song, app, args):
@@ -28,6 +28,7 @@ def hello(song, app, args):
             "replace_sample": hasattr(Live.SimplerDevice.SimplerDevice, "replace_sample"),
             "arrangement_create_midi_clip": hasattr(Live.Track.Track, "create_midi_clip"),
             "audio_clip": hasattr(Live.ClipSlot.ClipSlot, "create_audio_clip"),
+            "arrangement": hasattr(Live.Track.Track, "duplicate_clip_to_arrangement"),
         },
     }
 
@@ -643,6 +644,18 @@ def stop(song, app, args):
     return {"is_playing": False}
 
 
+MAX_BAR = 394_200  # Live's last Arrangement position, 1576800 beats, in 4/4 bars
+
+
+def play_arrangement(song, app, args):
+    bar = _whole(args, "from_bar", 1, MAX_BAR)
+    song.stop_all_clips()  # playing Session clips would override the Arrangement
+    song.back_to_arranger = False
+    song.current_song_time = (bar - 1) * 4.0  # 4/4, as the generators assume
+    song.start_playing()
+    return {"from_bar": bar, "song_time": song.current_song_time, "is_playing": True}
+
+
 def undo(song, app, args):
     if not song.can_undo:
         raise OpError("LIVE_STATE", "nothing to undo")
@@ -966,7 +979,7 @@ def set_parameters(song, app, args):
 
 
 # name -> (function, mutating). Mutating ops run inside one undo step.
-# Transport ops (fire_clip, fire_scene, stop) and undo itself are not undoable, so not wrapped.
+# Transport ops (fire_clip, fire_scene, stop, play_arrangement) and undo itself are not undoable, so not wrapped.
 OPS = {
     "hello": (hello, False),
     "get_overview": (get_overview, False),
@@ -987,6 +1000,7 @@ OPS = {
     "fire_clip": (fire_clip, False),
     "fire_scene": (fire_scene, False),
     "stop": (stop, False),
+    "play_arrangement": (play_arrangement, False),
     "undo": (undo, False),
     "browse": (browse, False),
     "load_item": (load_item, True),

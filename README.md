@@ -2,7 +2,7 @@
 
 MCP server that lets an MCP client (Claude Code) drive Ableton Live 12.1+ (Lite included) through a stdlib-only Remote Script. It also builds and reads presets for the free [Vital](https://vital.audio/) synth, and has an offline `.mid` writer. Both work with Live closed.
 
-Tested on Live 12.1.10 Lite (embedded Python 3.11.6) and Vital 1.5.5, macOS. Session View only.
+Tested on Live 12.1.10 Lite (embedded Python 3.11.6) and Vital 1.5.5, macOS. Builds in Session View only; `play_arrangement` plays the Arrangement.
 
 ## How it works
 
@@ -47,7 +47,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 36 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 37 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -84,6 +84,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `play_clip` | Fire a clip | no |
 | `fire_scene` | Launch every clip in a scene (not an undo step) | no |
 | `stop` | Stop playback | no |
+| `play_arrangement` | Stop all Session clips and play the Arrangement from `from_bar` (default 1, 4/4); not an undo step. Needs `features.arrangement` in `live_status` (Live 12.4+) | no |
 | `undo_last` | Undo the last change | no |
 | `write_midi_file` | Write a `.mid` to `~/Music/ableton-mcp/midi/` without Live | no |
 | `vital_create_preset` | Build a Vital synth preset (controls, modulation routes, saw/square/triangle/sine waves, a silent or white-noise sample) in `~/Music/Vital/User/Presets/` without Live; opens the Vital app with it if the app is closed | no |
@@ -153,7 +154,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
 1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11. `doctor` prints no FAIL and exits 0.
-2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 8`.
+2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 9`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
 5. `undo_last` removes only the last tool's change.
@@ -192,6 +193,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 37. On that track, `create_audio_clip` with a drum loop from the library, then `set_clip(start_marker=4, end_marker=8, loop_start=4, loop_end=8, looping=true, pitch_coarse=-2, warp_mode="Complex")`: the clip plays bar 2 only, 2 semitones down. `read_clip` shows the same values.
 38. Load a Simpler with `load_instrument(kind="simpler")`, `replace_sample` a drum loop into it, then `set_simpler(device_path=[0], playback_mode="Slicing", slicing_style="Beat", slicing_beat_division="1/8")`: `slice_count` > 1. A clip with note 36 plays the first slice, 37 the second.
 39. `set_simpler(device_path=[0], reverse=true)` plays the sample backwards. One `undo_last` restores it.
+40. Live 12.4 Lite: `live_status` shows `features.arrangement: true`. With a Session clip playing and material in the Arrangement, `play_arrangement(from_bar=3)` stops the Session clip, turns off Back to Arrangement and plays the Arrangement from bar 3. `undo_last` does not undo it.
 
 ## Development
 

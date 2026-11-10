@@ -794,33 +794,15 @@ def arrange(song, app, args):
     if start > MAX_BAR * 4:
         raise OpError("INVALID_ARG", f"the sections add up to {int(start) // 4} bars; Live's Arrangement ends at bar {MAX_BAR}")
     existing = [(track, clip) for _, track in tracks for clip in track.arrangement_clips]
-    cues = list(song.cue_points)
-    if (existing or cues) and not replace:
-        raise OpError("LIVE_STATE", f"the Arrangement already has {len(existing)} clips and {len(cues)} locators; "
+    if existing and not replace:
+        raise OpError("LIVE_STATE", f"the Arrangement already has {len(existing)} clips; "
                                     "pass replace=true to delete them first")
     for track, clip in existing:
         track.delete_clip(clip)
     for track, clip, first, copies in placements:
         for n in range(copies):
             track.duplicate_clip_to_arrangement(clip, first + n * clip.length)
-    # Live toggles a cue at the playback position, so move it there first and put it back after.
-    saved_time = song.current_song_time
-    for cue in cues:
-        _toggle_cue(song, cue.time)
-    for n, section in enumerate(result):
-        cue = _toggle_cue(song, (section["start_bar"] - 1) * 4.0)
-        if cue is not None:
-            cue.name = section["name"] or f"Section {n + 1}"
-        section["locator"] = cue.name if cue is not None else None  # None: Live put no locator at the section start
-    song.current_song_time = saved_time
     return {"sections": result, "total_bars": int(start) // 4}
-
-
-def _toggle_cue(song, time):
-    """Toggle the cue point at beat `time`; returns the cue now there, or None."""
-    song.current_song_time = time
-    song.set_or_delete_cue()
-    return next((c for c in song.cue_points if c.time == time), None)
 
 
 def undo(song, app, args):

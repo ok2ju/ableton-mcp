@@ -768,10 +768,8 @@ def arrange_scenes(sections: list[Section], replace: bool = False) -> CallToolRe
     """Lay scenes out as song sections on the Arrangement (the timeline), end to end from bar 1, e.g.
     [{"scene": 0, "bars": 8}, {"scene": 1, "bars": 16}]. Each track's clip in that scene repeats to fill the section;
     a track with an empty slot is silent there. Each clip's length in beats must divide bars*4 (loop it with set_clip
-    if not), and unwarped audio clips are refused. Adds a locator at each section start, named after its scene ("Section N"
-    if the scene has no name), and keeps the song position. An Arrangement that already has clips or locators is refused
-    unless replace=true, which deletes them all first. Returns each section's start_bar and locator (null if Live placed
-    none) and the total_bars. One undo step; then
+    if not), and unwarped audio clips are refused. An Arrangement that already has clips is refused unless replace=true,
+    which deletes them all first. Returns each section's start_bar and the total_bars. One undo step; then
     play_arrangement to hear it. Assumes 4/4. Needs Live 12.4+."""
     refused = _needs("arrangement", "12.4")
     if refused:

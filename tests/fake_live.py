@@ -89,16 +89,6 @@ class Scene:
         self.fired = True
 
 
-class CuePoint:
-    def __init__(self, time, name=""):
-        self._time = time
-        self.name = name
-
-    @property
-    def time(self):  # read-only in Live
-        return self._time
-
-
 class Envelope:
     """Records insert_step calls as (time, length, value)."""
 
@@ -306,7 +296,6 @@ class Song:
         self.clips_stopped = False
         self.back_to_arranger = True
         self.current_song_time = 0.0
-        self.cue_points = []
         self.tracks = []
         self.scenes = [Scene() for _ in range(8)]
         self.return_tracks = [Track("A-Reverb", has_midi_input=False, scenes=0), Track("B-Delay", has_midi_input=False, scenes=0)]
@@ -328,13 +317,6 @@ class Song:
     @property
     def scale_intervals(self):
         return tuple(SCALE_INTERVALS[self._scale_name])
-
-    def set_or_delete_cue(self):  # toggles a cue at the playback position, here current_song_time
-        here = [c for c in self.cue_points if c.time == self.current_song_time]
-        if here:
-            self.cue_points = [c for c in self.cue_points if c not in here]
-        else:
-            self.cue_points = self.cue_points + [CuePoint(self.current_song_time)]
 
     def begin_undo_step(self):
         self.undo_log.append("begin")

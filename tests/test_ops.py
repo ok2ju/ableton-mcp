@@ -3,7 +3,7 @@ import pytest
 from AbletonMCP import ops
 from AbletonMCP.bridge import OpError
 from fake_live import (
-    Application, Chain, Clip, CuePoint, Device, DeviceParameter, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, SimplerDevice,
+    Application, Chain, Clip, Device, DeviceParameter, DrumPad, DrumRack, InstrumentRack, MidiNoteSpecification, SimplerDevice,
     Song, Track,
     install_fake_live_module,
 )
@@ -696,39 +696,12 @@ def _placed(track):
 def test_arrange_repeats_clips_end_to_end(scenes_set):
     song, app = scenes_set
     out = ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 4}, {"scene": 1, "bars": 8}]})
-    assert out == {"sections": [{"scene": 0, "name": "Intro", "start_bar": 1, "bars": 4, "locator": "Intro"},
-                                {"scene": 1, "name": "Drop", "start_bar": 5, "bars": 8, "locator": "Drop"}],
-                   "total_bars": 12}
+    assert out == {"sections": [{"scene": 0, "name": "Intro", "start_bar": 1, "bars": 4},
+                                {"scene": 1, "name": "Drop", "start_bar": 5, "bars": 8}], "total_bars": 12}
     assert _placed(song.tracks[0]) == [(0.0, 4.0), (4.0, 4.0), (8.0, 4.0), (12.0, 4.0),
                                        (16.0, 8.0), (24.0, 8.0), (32.0, 8.0), (40.0, 8.0)]
     assert _placed(song.tracks[1]) == [(16.0, 16.0), (32.0, 16.0)]  # silent in the intro: its slot is empty
     assert ops.OPS["arrange"] == (ops.arrange, True)  # bridge wraps it in one undo step
-
-
-def test_arrange_adds_a_named_locator_per_section_and_restores_song_time(scenes_set):
-    song, app = scenes_set
-    song.scenes[1].name = ""
-    song.current_song_time = 6.0
-    ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 4}, {"scene": 1, "bars": 8}]})
-    assert [(c.time, c.name) for c in song.cue_points] == [(0.0, "Intro"), (16.0, "Section 2")]
-    assert song.current_song_time == 6.0
-
-
-def test_arrange_reports_a_missing_locator(scenes_set):
-    song, app = scenes_set
-    song.set_or_delete_cue = lambda: None  # Live left the playback position elsewhere
-    out = ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 4}]})
-    assert out["sections"][0]["locator"] is None and song.cue_points == []
-
-
-def test_arrange_locators_alone_block_unless_replace(scenes_set):
-    song, app = scenes_set
-    song.cue_points = [CuePoint(8.0, "Old"), CuePoint(0.0, "Older")]
-    e = _err(ops.arrange, song, app, {"sections": [{"scene": 0, "bars": 1}]})
-    assert e.code == "LIVE_STATE" and "replace=true" in str(e) and "2 locators" in str(e)
-    assert [c.name for c in song.cue_points] == ["Old", "Older"] and song.tracks[0].arrangement_clips == []
-    ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 1}], "replace": True})
-    assert [(c.time, c.name) for c in song.cue_points] == [(0.0, "Intro")]
 
 
 def test_arrange_skips_group_tracks(scenes_set):

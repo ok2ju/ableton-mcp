@@ -9,8 +9,8 @@ import sys
 
 from .bridge import OpError
 
-SCRIPT_VERSION = "0.6.0"
-PROTOCOL_VERSION = 8
+SCRIPT_VERSION = "0.7.0"
+PROTOCOL_VERSION = 9
 
 
 def hello(song, app, args):
@@ -28,6 +28,8 @@ def hello(song, app, args):
             "replace_sample": hasattr(Live.SimplerDevice.SimplerDevice, "replace_sample"),
             "arrangement_create_midi_clip": hasattr(Live.Track.Track, "create_midi_clip"),
             "audio_clip": hasattr(Live.ClipSlot.ClipSlot, "create_audio_clip"),
+            "arrangement": hasattr(Live.Track.Track, "duplicate_clip_to_arrangement"),
+            "clip_envelopes": hasattr(Live.Clip.Clip, "create_automation_envelope"),
         },
     }
 
@@ -113,12 +115,21 @@ def _lowest_value(param, above):
     return hi
 
 
-def _set_db(param, db):
-    """Set the value Live displays as db. Live rounds the display to 0.1 dB, so aim at the middle
+def _db_value(param, db):
+    """The raw value Live displays as db. Live rounds the display to 0.1 dB, so aim at the middle
     of the values that display as db, not at its edge."""
     start = _lowest_value(param, lambda d: d >= db)
     end = _lowest_value(param, lambda d: d > db)
-    param.value = (start + end) / 2
+    return (start + end) / 2
+
+
+def _set_db(param, db):
+    param.value = _db_value(param, db)
+
+
+def _pan_value(param, pan):
+    """Raw value for pan -50 (50L) .. 50 (50R)."""
+    return param.min + (pan + 50) / 100 * (param.max - param.min)
 
 
 def _pan(param):
@@ -543,8 +554,7 @@ def set_mix(song, app, args):
     if volume is not None:
         _set_db(m.volume, volume)
     if pan is not None:
-        p = m.panning
-        p.value = p.min + (pan + 50) / 100 * (p.max - p.min)
+        m.panning.value = _pan_value(m.panning, pan)
     if "mute" in args:
         track.mute = args["mute"]
     if "solo" in args:  # Live bypasses exclusive solo here: other tracks stay soloed
@@ -552,6 +562,100 @@ def set_mix(song, app, args):
     for letter, db in sends.items():
         _set_db(params[letter], float(db))
     return {"track": args["track"], **_mix(song, track)}
+
+
+ENVELOPE_STEP = 0.25  # beats: a 1/16 note
+
+
+def _envelope_target(song, args):
+    """(param, unit) for a clip envelope target: "volume" and "send A".. in dB, "pan" in -50..50,
+    and with device_path a device parameter by name in raw units."""
+    if args.get("device_path") is not None:
+        return _param_by_name(_device(song, args), args["parameter"])[1], "raw"
+    track, name = _track(song, args), args["parameter"]
+    m = track.mixer_device
+    if name == "volume":
+        return m.volume, "db"
+    if name == "pan":
+        return m.panning, "pan"
+    sends = dict(zip(SEND_LETTERS, m.sends))
+    letter = name[5:] if isinstance(name, str) and name.startswith("send ") else None
+    if letter in sends:
+        return sends[letter], "db"
+    if letter is not None:
+        raise OpError("INVALID_ARG", f"no send {letter!r}; this Set has sends {', '.join(sends) or 'none'}")
+    raise OpError("INVALID_ARG", 'parameter must be "volume", "pan" or "send A", "send B", ...')
+
+
+def set_envelope(song, app, args):
+    slot = _slot(song, args)
+    if not slot.has_clip:
+        raise OpError("NOT_FOUND", "that clip slot is empty")
+    clip = slot.clip
+    if not clip.is_midi_clip and not clip.warping:
+        raise OpError("LIVE_STATE", "the audio clip is unwarped, so its length is in seconds, not beats; "
+                      "turn warping on with set_clip first")
+    param, unit = _envelope_target(song, args)
+    points = args["points"]
+    if not isinstance(points, list):
+        raise OpError("INVALID_ARG", "points must be a list of {time, value}")
+    # Validate every point first, so a bad one writes nothing.
+    times, values = [], []
+    for i, point in enumerate(points):
+        if not isinstance(point, dict):
+            raise OpError("INVALID_ARG", f"point {i} must be an object {{time, value}}")
+        time = _number(point, "time")
+        if unit == "raw":  # the device parameter's own min..max, or an item name for a quantized one
+            if "value" not in point:
+                raise OpError("INVALID_ARG", f"point {i} needs a value")
+            try:
+                value = _param_value(param, point["value"])
+            except OpError as e:
+                raise OpError(e.code, f"point {i}: {e}")
+        else:
+            value = _number(point, "value")
+        if not 0 <= time <= clip.length:
+            raise OpError("INVALID_ARG", f"point {i} time {time:g} is outside the clip (0..{clip.length:g} beats)")
+        if times and time <= times[-1]:
+            raise OpError("INVALID_ARG", f"point {i} time {time:g} must be later than the point before it")
+        if unit == "pan" and not -50 <= value <= 50:
+            raise OpError("INVALID_ARG", f"point {i} pan must be -50 (50L) .. 50 (50R)")
+        if unit == "db":
+            _check_db(param, value, f"point {i} {args['parameter']}")
+        times.append(time)
+        values.append(value)
+    if clip.automation_envelope(param) is not None:
+        clip.clear_envelope(param)  # replace, not merge
+    if not points:
+        return {"track": args["track"], "slot": args["slot"], "parameter": args["parameter"], "steps": 0}
+    envelope = clip.automation_envelope(param) or clip.create_automation_envelope(param)
+    raw = {}  # display value rounded to 0.1 -> raw; the dB search is 80 str_for_value calls
+
+    def step(start, length, value):
+        if unit == "raw":
+            envelope.insert_step(start, length, value)
+            return
+        key = round(value, 1)
+        if key not in raw:
+            raw[key] = _db_value(param, key) if unit == "db" else _pan_value(param, key)
+        envelope.insert_step(start, length, raw[key])
+
+    # Ramp each pair in 1/16 steps, interpolated in display (or raw) units; each step takes the value at its start.
+    # A quantized device parameter does not interpolate: it holds each point's value until the next point.
+    quantized = unit == "raw" and param.is_quantized
+    count = 0
+    for t0, v0, t1, v1 in zip(times, values, times[1:], values[1:]):
+        k = 0
+        while t0 + k * ENVELOPE_STEP < t1:
+            start = t0 + k * ENVELOPE_STEP
+            value = v0 if quantized else v0 + (v1 - v0) * (start - t0) / (t1 - t0)
+            step(start, min(ENVELOPE_STEP, t1 - start), value)
+            count += 1
+            k += 1
+    if times[-1] < clip.length:  # hold the last value to the clip end
+        step(times[-1], clip.length - times[-1], values[-1])
+        count += 1
+    return {"track": args["track"], "slot": args["slot"], "parameter": args["parameter"], "steps": count}
 
 
 def create_scene(song, app, args):
@@ -641,6 +745,68 @@ def fire_clip(song, app, args):
 def stop(song, app, args):
     song.stop_playing()
     return {"is_playing": False}
+
+
+MAX_BAR = 394_200  # Live's last Arrangement position, 1576800 beats, in 4/4 bars
+
+
+def play_arrangement(song, app, args):
+    bar = _whole(args, "from_bar", 1, MAX_BAR)
+    song.stop_all_clips()  # playing Session clips would override the Arrangement
+    song.back_to_arranger = False
+    song.current_song_time = (bar - 1) * 4.0  # 4/4, as the generators assume
+    song.start_playing()
+    # Report the requested position: Live 12.4 can return the old current_song_time until its next tick.
+    return {"from_bar": bar, "song_time": (bar - 1) * 4.0, "is_playing": True}
+
+
+MAX_SECTION_BARS = 256
+
+
+def arrange(song, app, args):
+    """Lay scenes end to end on the Arrangement from beat 0. Each track's clip in a section's scene is copied
+    and repeated to fill the section; an empty slot is silent there. Validates all before writing any. Assumes 4/4."""
+    sections = args["sections"]
+    if not isinstance(sections, list) or not sections:
+        raise OpError("INVALID_ARG", "sections must be a non-empty list of {scene, bars}")
+    replace = args.get("replace", False)
+    if not isinstance(replace, bool):
+        raise OpError("INVALID_ARG", "replace must be true or false")
+    tracks = [(t, track) for t, track in enumerate(song.tracks) if not track.is_foldable]  # group tracks hold no clips
+    placements, result, start = [], [], 0.0  # placements: (track, clip, first beat, copies)
+    for section in sections:
+        scene = _scene(song, section)
+        i = section["scene"]
+        bars = _whole(section, "bars", 1, MAX_SECTION_BARS)
+        beats = bars * 4.0
+        for t, track in tracks:
+            slot = list(track.clip_slots)[i]
+            if not slot.has_clip:
+                continue
+            clip = slot.clip
+            if not clip.is_midi_clip and not clip.warping:
+                raise OpError("LIVE_STATE", f"track {t}, scene {i}: the audio clip is unwarped, so its length is in "
+                                            "seconds; set_clip warping true first")
+            copies = beats / clip.length
+            if copies != int(copies):
+                raise OpError("INVALID_ARG", f"track {t}, scene {i}: the {clip.length:g}-beat clip does not fill "
+                                             f"{bars} bars ({beats:g} beats) evenly; loop it to a length that divides "
+                                             "it with set_clip, or change bars")
+            placements.append((track, clip, start, int(copies)))
+        result.append({"scene": i, "name": scene.name, "start_bar": int(start) // 4 + 1, "bars": bars})
+        start += beats
+    if start > MAX_BAR * 4:
+        raise OpError("INVALID_ARG", f"the sections add up to {int(start) // 4} bars; Live's Arrangement ends at bar {MAX_BAR}")
+    existing = [(track, clip) for _, track in tracks for clip in track.arrangement_clips]
+    if existing and not replace:
+        raise OpError("LIVE_STATE", f"the Arrangement already has {len(existing)} clips; "
+                                    "pass replace=true to delete them first")
+    for track, clip in existing:
+        track.delete_clip(clip)
+    for track, clip, first, copies in placements:
+        for n in range(copies):
+            track.duplicate_clip_to_arrangement(clip, first + n * clip.length)
+    return {"sections": result, "total_bars": int(start) // 4}
 
 
 def undo(song, app, args):
@@ -938,35 +1104,41 @@ def _param_value(p, value):
     return value
 
 
+def _param_by_name(device, name):
+    """(index, param) for a read_device parameter name, case ignored. Refuses unknown, ambiguous and disabled names."""
+    params = list(device.parameters)
+    names = [p.name.lower() for p in params]
+    hits = [i for i, n in enumerate(names) if n == str(name).lower()]
+    if not hits:
+        close = difflib.get_close_matches(str(name).lower(), names, n=3)
+        hint = f"did you mean {', '.join(params[names.index(c)].name for c in close)}?" if close else "read_device lists the names"
+        raise OpError("NOT_FOUND", f"'{device.name}' has no parameter '{name}'; {hint}")
+    if len(hits) > 1:
+        raise OpError("INVALID_ARG", f"'{device.name}' has {len(hits)} parameters named '{name}'")
+    p = params[hits[0]]
+    if not p.is_enabled:
+        raise OpError("LIVE_STATE", f"'{p.name}' is controlled by a macro or locked")
+    return hits[0], p
+
+
 def set_parameters(song, app, args):
     device = _device(song, args)
     values = args["values"]
     if not isinstance(values, dict) or not values:
         raise OpError("INVALID_ARG", "values must map parameter names to values")
-    params = list(device.parameters)
-    names = [p.name.lower() for p in params]
     todo = []
     for name, value in values.items():  # validate everything before setting anything
-        hits = [i for i, n in enumerate(names) if n == str(name).lower()]
-        if not hits:
-            close = difflib.get_close_matches(str(name).lower(), names, n=3)
-            hint = f"did you mean {', '.join(params[names.index(c)].name for c in close)}?" if close else "read_device lists the names"
-            raise OpError("NOT_FOUND", f"'{device.name}' has no parameter '{name}'; {hint}")
-        if len(hits) > 1:
-            raise OpError("INVALID_ARG", f"'{device.name}' has {len(hits)} parameters named '{name}'")
-        if any(i == hits[0] for i, _, _ in todo):
+        index, p = _param_by_name(device, name)
+        if any(i == index for i, _, _ in todo):
             raise OpError("INVALID_ARG", f"'{name}' is given twice")
-        p = params[hits[0]]
-        if not p.is_enabled:
-            raise OpError("LIVE_STATE", f"'{p.name}' is controlled by a macro or locked")
-        todo.append((hits[0], p, _param_value(p, value)))
+        todo.append((index, p, _param_value(p, value)))
     for _, p, value in todo:
         p.value = value
     return {"track": args["track"], "device_path": args["device_path"], "changed": [_param_info(i, p) for i, p, _ in todo]}
 
 
 # name -> (function, mutating). Mutating ops run inside one undo step.
-# Transport ops (fire_clip, fire_scene, stop) and undo itself are not undoable, so not wrapped.
+# Transport ops (fire_clip, fire_scene, stop, play_arrangement) and undo itself are not undoable, so not wrapped.
 OPS = {
     "hello": (hello, False),
     "get_overview": (get_overview, False),
@@ -987,6 +1159,8 @@ OPS = {
     "fire_clip": (fire_clip, False),
     "fire_scene": (fire_scene, False),
     "stop": (stop, False),
+    "play_arrangement": (play_arrangement, False),
+    "arrange": (arrange, True),
     "undo": (undo, False),
     "browse": (browse, False),
     "load_item": (load_item, True),
@@ -998,5 +1172,6 @@ OPS = {
     "insert_device": (insert_device, True),
     "delete_device": (delete_device, True),
     "set_mix": (set_mix, True),
+    "set_envelope": (set_envelope, True),
     "set_label": (set_label, True),
 }

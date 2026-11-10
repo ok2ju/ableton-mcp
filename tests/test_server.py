@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import sys
 
 import pytest
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
@@ -32,17 +33,22 @@ TOOL_NAMES = [
     "load_instrument",
     "read_device",
     "set_device_parameters",
+    "list_samples",
+    "analyze_sample",
     "create_audio_clip",
     "replace_sample",
     "set_simpler",
     "insert_device",
     "delete_device",
     "set_track_mix",
+    "set_clip_envelope",
     "set_label",
     "set_tempo",
     "play_clip",
     "fire_scene",
     "stop",
+    "arrange_scenes",
+    "play_arrangement",
     "undo_last",
     "write_midi_file",
     "vital_create_preset",
@@ -50,10 +56,11 @@ TOOL_NAMES = [
 ]
 READ_ONLY_TOOLS = {
     "live_status", "get_set_overview", "read_notes", "read_clip", "browse_library", "read_device", "vital_read_preset",
+    "list_samples", "analyze_sample",
 }
 DESTRUCTIVE_TOOLS = {
-    "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device",
-    "create_drum_pattern", "create_bassline", "create_chord_progression",
+    "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device", "arrange_scenes",
+    "set_clip_envelope", "create_drum_pattern", "create_bassline", "create_chord_progression",
 }
 
 
@@ -275,8 +282,8 @@ def test_write_midi_file_os_error_is_error(monkeypatch, tmp_path):
     assert "Could not write the MIDI file" in result.content[0].text
 
 
-def test_protocol_version_is_8():
-    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 8
+def test_protocol_version_is_9():
+    assert server.PROTOCOL_VERSION == ops.PROTOCOL_VERSION == 9
 
 
 PADS_808 = [
@@ -593,6 +600,7 @@ PROMPT_NAMES = [
     "lesson-melody",
     "lesson-song-structure",
     "explain-my-set",
+    "make-track-from-samples",
 ]
 
 
@@ -627,6 +635,14 @@ def test_explain_my_set_names_no_write_tool():
         assert forbidden not in text
     named = set(re.findall(r"`([a-z]+(?:_[a-z]+)+)`", text))
     assert named and named <= READ_ONLY_TOOLS, named - READ_ONLY_TOOLS
+
+
+def test_make_track_prompt_arranges_plays_and_reminds():
+    text = prompt_text("make-track-from-samples")
+    for needed in ("`list_samples`", "`analyze_sample`", "`arrange_scenes`", "`play_arrangement`",
+                   "`set_clip_envelope`", "minutes = bars x 4 / BPM", "locators", "Cmd+S", "Export Audio/Video"):
+        assert needed in text, needed
+    assert "make-track-from-samples" in server.mcp.instructions
 
 
 def test_texts_name_only_real_tools():
@@ -716,6 +732,30 @@ def test_vital_read_preset(vital_dir):
     assert "not a Vital preset" in junk.content[0].text
 
 
+def test_list_samples(tmp_path):
+    (tmp_path / "Kick.wav").write_bytes(b"RIFF")
+    result = call_tool("list_samples", {"folder": str(tmp_path)})
+    assert result.is_error is False
+    assert result.structured_content["total"] == 1
+
+    for folder in ("Samples", str(tmp_path / "missing"), str(tmp_path / "Kick.wav")):
+        bad = call_tool("list_samples", {"folder": folder})
+        assert bad.is_error is True, folder
+
+
+def test_analyze_sample_without_librosa(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "librosa", None)  # makes `import librosa` raise ImportError
+    (tmp_path / "Loop.wav").write_bytes(b"RIFF")
+    result = call_tool("analyze_sample", {"file_path": str(tmp_path / "Loop.wav")})
+    assert result.is_error is True
+    assert "uv sync --extra hearing" in result.content[0].text
+
+    for path in ("Loop.wav", str(tmp_path / "missing.wav"), str(tmp_path)):
+        bad = call_tool("analyze_sample", {"file_path": path})
+        assert bad.is_error is True, path
+        assert "hearing" not in bad.content[0].text, path
+
+
 def test_vital_create_preset_without_standalone(vital_dir, monkeypatch, tmp_path):
     monkeypatch.setattr(vital, "VITAL_BINARY", tmp_path / "missing")
     monkeypatch.setattr(vital, "launch", lambda path: False)
@@ -748,10 +788,12 @@ def test_vital_create_preset_white_noise_sample(vital_dir):
 
 HELLO_12_4 = {
     "protocol_version": server.PROTOCOL_VERSION, "live_version": "12.4.16", "variant": "Lite",
-    "features": {"insert_device": True, "replace_sample": True, "audio_clip": True},
+    "features": {"insert_device": True, "replace_sample": True, "audio_clip": True, "arrangement": True,
+                 "clip_envelopes": True},
 }
 HELLO_12_1 = {**HELLO_12_4, "live_version": "12.1.10",
-              "features": {"insert_device": False, "replace_sample": False, "audio_clip": False}}
+              "features": {"insert_device": False, "replace_sample": False, "audio_clip": False, "arrangement": False,
+                           "clip_envelopes": False}}
 SAMPLE_TOOLS = [
     ("create_audio_clip", {"track": 0, "slot": 0}),
     ("replace_sample", {"track": 0, "pad_note": 36}),
@@ -801,6 +843,60 @@ def test_audio_clip_bad_sample_never_reaches_live(monkeypatch, tmp_path):
     result = call_tool("create_audio_clip", {"track": 0, "slot": 0, "file_path": str(tmp_path / "nope.wav")})
     assert result.is_error is True and "No file" in result.content[0].text
     assert [op for op, _ in fake.calls] == ["hello"]
+
+
+def test_play_arrangement_not_gated(monkeypatch):
+    fake = FakeClient({"play_arrangement": {"from_bar": 5}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("play_arrangement", {"from_bar": 5}).is_error is False
+    assert fake.calls == [("play_arrangement", {"from_bar": 5})]
+
+
+def test_play_arrangement_sends_bar(monkeypatch):
+    fake = FakeClient({"play_arrangement": {"from_bar": 1}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("play_arrangement").is_error is False
+    assert fake.calls == [("play_arrangement", {"from_bar": 1})]
+
+
+SECTIONS = [{"scene": 0, "bars": 4}, {"scene": 1, "bars": 8}]
+
+
+def test_arrange_scenes_refused_without_feature(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_1})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("arrange_scenes", {"sections": SECTIONS})
+    assert result.is_error is True and "needs Live 12.4+" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+
+
+def test_arrange_scenes_sends_sections(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_4, "arrange": {"total_bars": 12}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("arrange_scenes", {"sections": SECTIONS, "replace": True}).is_error is False
+    assert fake.calls == [("hello", {}), ("arrange", {"sections": SECTIONS, "replace": True})]
+
+
+RAMP = [{"time": 0, "value": -24}, {"time": 16, "value": 0}]
+
+
+def test_set_clip_envelope_refused_without_feature(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_1})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("set_clip_envelope", {"track": 0, "slot": 0, "parameter": "volume", "points": RAMP})
+    assert result.is_error is True and "needs Live 12.4+" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+    assert server.PROTOCOL_VERSION == 9  # this release's one bump already happened
+
+
+def test_set_clip_envelope_sends_points(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_4, "set_envelope": {"steps": 64}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("set_clip_envelope", {"track": 1, "slot": 2, "parameter": "send A", "points": RAMP}).is_error is False
+    assert fake.calls[1] == ("set_envelope", {"track": 1, "slot": 2, "parameter": "send A", "points": RAMP})
+    cutoff = [{"time": 0, "value": 0.2}, {"time": 8, "value": "On"}]
+    call_tool("set_clip_envelope", {"track": 1, "slot": 2, "parameter": "Frequency", "points": cutoff, "device_path": [1]})
+    assert fake.calls[3] == ("set_envelope", {"track": 1, "slot": 2, "parameter": "Frequency", "points": cutoff, "device_path": [1]})
 
 
 def test_insert_device_main(monkeypatch):

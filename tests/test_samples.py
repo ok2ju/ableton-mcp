@@ -1,3 +1,6 @@
+import wave
+from pathlib import Path
+
 import pytest
 
 from ableton_mcp import samples
@@ -80,3 +83,80 @@ def test_same_name_twice_lists_both(lib):
         samples.resolve("samples", [ATMOS])
     assert "2 files" in str(e.value) and str(dup) in str(e.value)
     assert str(lib / "core" / "Loops" / "Tonal" / "Synth" / ATMOS) in str(e.value)
+
+
+def _wav(path, seconds, rate=8000):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x00\x00" * int(seconds * rate))
+
+
+@pytest.fixture
+def folder(tmp_path):
+    (tmp_path / "Loops").mkdir()
+    _wav(tmp_path / "Kick 01.wav", 0.5)
+    _wav(tmp_path / "Loops" / "Dusty Loop 92 BPM Am.wav", 4.0)
+    _wav(tmp_path / "Pad A.wav", 1.0)
+    (tmp_path / "Kick 01.wav.asd").write_bytes(b"x")
+    (tmp_path / ".hidden.wav").write_bytes(b"RIFF")
+    (tmp_path / "notes.txt").write_text("hi")
+    return tmp_path
+
+
+def test_scan_lists_audio_with_filename_guesses(folder):
+    result = samples.scan(str(folder))
+    assert result["total"] == 3
+    kick, loop, pad = result["files"]  # sorted by path: "Kick 01.wav" < "Loops/..." < "Pad A.wav"
+    assert [kick["name"], loop["name"], pad["name"]] == ["Kick 01.wav", "Dusty Loop 92 BPM Am.wav", "Pad A.wav"]
+    assert (kick["role"], kick["kind"]) == ("kick", "one_shot")
+    assert (loop["bpm"], loop["key"], loop["kind"]) == (92, "A minor", "loop")
+    assert pad["key"] is None and pad["role"] == "pad"
+    assert kick["path"] == str(folder / "Kick 01.wav")
+
+
+def test_scan_duration_from_pcm_wav(folder):
+    pad = next(f for f in samples.scan(str(folder))["files"] if f["name"] == "Pad A.wav")
+    assert pad["duration_s"] == 1.0
+
+
+def test_duration_null_for_unreadable_or_non_wav(tmp_path):
+    (tmp_path / "x.wav").write_bytes(b"not a wav")
+    (tmp_path / "y.mp3").write_bytes(b"ID3")
+    assert samples._duration(tmp_path / "x.wav") is None
+    assert samples._duration(tmp_path / "y.mp3") is None
+
+
+def test_scan_limit_keeps_total(folder):
+    result = samples.scan(str(folder), limit=1)
+    assert result["total"] == 3 and len(result["files"]) == 1
+
+
+@pytest.mark.parametrize("name, key", [
+    ("F# Lead", "F#"), ("Bb_bass", "Bb"), ("C maj chord", "C major"), ("Ab-minor", "Ab minor"),
+    ("Pad A", None), ("FM Lead", None), ("Bass 808", None),
+])
+def test_key_needs_accidental_or_mode(name, key):
+    assert samples._key(name) == key
+
+
+def test_scan_errors(tmp_path):
+    with pytest.raises(ValueError, match="absolute"):
+        samples.scan("Samples")
+    with pytest.raises(ValueError, match="No folder"):
+        samples.scan(str(tmp_path / "missing"))
+    (tmp_path / "notes.txt").write_text("hi")
+    with pytest.raises(ValueError, match="No audio files"):
+        samples.scan(str(tmp_path))
+
+
+def test_duration_from_soundfile_for_non_wav(tmp_path):
+    soundfile = pytest.importorskip("soundfile")  # comes with the hearing extra
+    soundfile.write(str(tmp_path / "tone.flac"), [0.0] * 22050, 44100)
+    assert samples._duration(tmp_path / "tone.flac") == 0.5
+
+
+def test_drum_and_bass_is_a_genre_not_a_bass_role():
+    assert samples.describe(Path("Drum and Bass Rolling 170 bpm.wav"))["role"] is None
+    assert samples.describe(Path("DnB Sub Bass 174 bpm.wav"))["role"] == "bass"

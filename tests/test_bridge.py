@@ -276,6 +276,13 @@ def test_fire_scene_no_undo_step(env):
     assert out["ok"] and song.scenes[0].fired and song.undo_log == []
 
 
+def test_play_arrangement_no_undo_step(env):
+    bridge, song, sock, conn = env
+    sock.sendall(line(req(conn["token"], "play_arrangement", {"from_bar": 1})))
+    (out,) = read_responses(bridge, sock, 1)
+    assert out["ok"] and song.is_playing and song.undo_log == []
+
+
 def test_set_parameters_one_undo_pair(env):
     bridge, song, sock, conn = env
     song.create_midi_track(-1)

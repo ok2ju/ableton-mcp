@@ -89,6 +89,16 @@ class Scene:
         self.fired = True
 
 
+class Envelope:
+    """Records insert_step calls as (time, length, value)."""
+
+    def __init__(self):
+        self.steps = []
+
+    def insert_step(self, time, length, value):
+        self.steps.append((time, length, value))
+
+
 class Clip:
     def __init__(self, length, is_midi_clip=True):
         self.name = ""
@@ -107,6 +117,8 @@ class Clip:
         self.pitch_fine = 0
         self.notes = []
         self._next_id = 1
+        self.envelopes = {}  # param -> Envelope
+        self.cleared = []  # params passed to clear_envelope
 
     # Live refuses a start at or past its end, like the real setters.
     def _check(self, start, end):
@@ -137,6 +149,20 @@ class Clip:
 
     def remove_notes_by_id(self, ids):
         self.notes = [n for n in self.notes if n.note_id not in set(ids)]
+
+    # Clip envelopes as probed on Live 12.4.16 (docs/ableton-mcp-research.md 3.4).
+    def automation_envelope(self, param):
+        return self.envelopes.get(param)
+
+    def create_automation_envelope(self, param):
+        if param in self.envelopes:
+            raise RuntimeError("Envelope already exists")
+        self.envelopes[param] = Envelope()
+        return self.envelopes[param]
+
+    def clear_envelope(self, param):
+        self.cleared.append(param)
+        self.envelopes.pop(param, None)
 
 
 class ClipSlot:
@@ -183,9 +209,18 @@ class Track:
         self.devices = []
         self.view = types.SimpleNamespace(selected_device=None)
         self.clip_slots = [ClipSlot() for _ in range(scenes)]
+        self.arrangement_clips = []
 
     def create_midi_clip(self, start_time, length):  # arrangement, 12.1.10+
         raise NotImplementedError
+
+    def duplicate_clip_to_arrangement(self, clip, destination_time):  # hello's `arrangement` feature
+        placed = copy.deepcopy(clip)
+        placed.start_time = destination_time
+        self.arrangement_clips = self.arrangement_clips + [placed]
+
+    def delete_clip(self, clip):  # arrangement clips
+        self.arrangement_clips = [c for c in self.arrangement_clips if c is not clip]
 
     def insert_device(self, device_name, target_index=None):  # 12.3+, native devices only
         if device_name not in NATIVE_DEVICES:
@@ -258,6 +293,9 @@ class Song:
         self._scale_name = "Major"
         self.scale_mode = False
         self.is_playing = False
+        self.clips_stopped = False
+        self.back_to_arranger = True
+        self.current_song_time = 0.0
         self.tracks = []
         self.scenes = [Scene() for _ in range(8)]
         self.return_tracks = [Track("A-Reverb", has_midi_input=False, scenes=0), Track("B-Delay", has_midi_input=False, scenes=0)]
@@ -321,6 +359,12 @@ class Song:
     def stop_playing(self):
         self.is_playing = False
 
+    def start_playing(self):
+        self.is_playing = True
+
+    def stop_all_clips(self):
+        self.clips_stopped = True
+
     def undo(self):
         self.undo_count += 1
 
@@ -376,12 +420,13 @@ class Track12_1:
 
 def install_fake_live_module(version=(12, 1, 10)):
     """Put a fake `Live` package into sys.modules and return it. Below 12.4 the classes hello inspects
-    lack insert_device, replace_sample and create_audio_clip; the fake objects themselves always have them."""
+    lack insert_device, replace_sample, create_audio_clip and clip envelopes; the fake objects themselves always have them."""
     live = types.ModuleType("Live")
     modern = version >= (12, 4)
     live.Track = types.SimpleNamespace(Track=Track if modern else Track12_1)
     live.SimplerDevice = types.SimpleNamespace(SimplerDevice=SimplerDevice if modern else type("SimplerDevice", (), {}))
     live.ClipSlot = types.SimpleNamespace(ClipSlot=ClipSlot if modern else type("ClipSlot", (), {}))
-    live.Clip = types.SimpleNamespace(MidiNoteSpecification=MidiNoteSpecification)
+    live.Clip = types.SimpleNamespace(MidiNoteSpecification=MidiNoteSpecification,
+                                      Clip=Clip if modern else type("Clip", (), {}))
     sys.modules["Live"] = live
     return live

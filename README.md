@@ -2,7 +2,7 @@
 
 MCP server that lets an MCP client (Claude Code) drive Ableton Live 12.1+ (Lite included) through a stdlib-only Remote Script. It also builds and reads presets for the free [Vital](https://vital.audio/) synth, and has an offline `.mid` writer. Both work with Live closed.
 
-Tested on Live 12.1.10 Lite (embedded Python 3.11.6) and Vital 1.5.5, macOS. Session View only.
+Tested on Live 12.1.10 Lite (embedded Python 3.11.6) and Vital 1.5.5, macOS. Builds in Session View; `arrange_scenes` lays scenes out on the Arrangement and `play_arrangement` plays it.
 
 ## How it works
 
@@ -30,6 +30,12 @@ Register with Claude Code:
 claude mcp add ableton -- uv --directory /path/to/ableton-mcp run ableton-mcp
 ```
 
+Optional: `analyze_sample` (tempo and key from a sample's audio) needs the `hearing` extra, which installs [librosa](https://librosa.org/doc/latest/install.html) with numpy, scipy, scikit-learn, numba and soundfile. The base install stays `mcp` only.
+
+```sh
+uv sync --extra hearing
+```
+
 Check the whole setup:
 
 ```sh
@@ -47,7 +53,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 36 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 41 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -73,17 +79,22 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `load_instrument` | Load an instrument by kind (drift, simpler, impulse, drum_rack, ...), optionally a preset by name; refuses non-Lite kinds on Lite | no |
 | `read_device` | A device's parameters (name, raw value, min/max, Live's `display` text, switch `items`) and a rack's chains; `device_path` reaches into racks | yes |
 | `set_device_parameters` | Set several parameters of one device by name, in one undo step; all-or-nothing | no |
+| `list_samples` | Audio files under an absolute folder, recursively (hidden and `.asd` files skipped), sorted by path and capped by `limit` (default 100; scan a subfolder for big libraries), with `total`; each with `duration_s` (PCM WAV, or any format with the `hearing` extra; else null) and filename guesses at `role`, `kind` (loop, one_shot, unknown), `bpm` and `key`; works without Live | yes |
+| `analyze_sample` | Tempo (`bpm` with `bpm_half` / `bpm_double`, and `bpm_loop`: the whole-bar tempo for a loop) and key (`key` such as "A minor", `key_confidence`) estimated from an absolute `file_path`'s audio, plus `duration_s`; needs the `hearing` extra; works without Live | yes |
 | `create_audio_clip` | Put a library sample (`samples` / `user_library` root + path) or an absolute `file_path` into an empty Session slot of an audio track; reports `warping` and `length_beats` (Live 12.4+) | no |
 | `replace_sample` | Swap the sample of a Simpler, by `device_path` or by Drum Rack `pad_note` (destructive, one undo step; Live 12.4+) | no |
 | `set_simpler` | A Simpler's playback mode (Classic, One-Shot, Slicing), slicing style, beat division, sensitivity, region count, slicing playback mode, warping and warp mode; optional `reverse` / `crop` (destructive with crop); returns `slice_count` and `slice_times_s`; by `device_path` or `pad_note`, one undo step | no |
 | `insert_device` | Add a native Live device (e.g. Limiter, Channel EQ) after the existing ones, or at `index`, without replacing the instrument; `track="main"` is the Main track (Live 12.3+) | no |
 | `delete_device` | Remove one device (effect or instrument) by `device_path`, also inside rack chains; `track="main"` is the Main track (destructive, one undo step) | no |
 | `set_track_mix` | Set a track's volume (dB), pan (-50..50), mute, solo and sends (dB, by return letter); one undo step | no |
+| `set_clip_envelope` | Automate a Session clip's own track `volume` (dB), `pan` (-50..50) or `send A`.. (dB), or with `device_path` a parameter of a device on that track by its `read_device` name (raw min..max, or an item name for a switch), from `points` `[{time, value}]` (beats, rising, inside the clip): ramps in 1/16-note steps (a switch holds each point's item), holds the last value to the clip end; replaces that envelope, `points=[]` clears it; all-or-nothing (destructive, one undo step; Live 12.4+) | no |
 | `set_label` | Rename and/or colour a track, a clip (track + slot) or a scene | no |
 | `set_tempo` | Set BPM (20-999) | no |
 | `play_clip` | Fire a clip | no |
 | `fire_scene` | Launch every clip in a scene (not an undo step) | no |
 | `stop` | Stop playback | no |
+| `arrange_scenes` | Lay scenes end to end on the Arrangement from bar 1 as `sections` `[{scene, bars}]` (bars 1-256, 4/4); each clip repeats to fill its section, an empty slot is silent; returns each section's `start_bar` and `total_bars`. A non-empty Arrangement is refused unless `replace=true`, which deletes its clips first (destructive, one undo step; Live 12.4+) | no |
+| `play_arrangement` | Stop all Session clips and play the Arrangement from `from_bar` (default 1, 4/4); not an undo step. Needs `features.arrangement` in `live_status` (Live 12.4+) | no |
 | `undo_last` | Undo the last change | no |
 | `write_midi_file` | Write a `.mid` to `~/Music/ableton-mcp/midi/` without Live | no |
 | `vital_create_preset` | Build a Vital synth preset (controls, modulation routes, saw/square/triangle/sine waves, a silent or white-noise sample) in `~/Music/Vital/User/Presets/` without Live; opens the Vital app with it if the app is closed | no |
@@ -91,7 +102,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 If Live or the Remote Script is not reachable, or the script reports an error, the tool returns an `isError` result with the reason.
 
-Tools that delete tracks or clips, replace a clip's notes, or write a generated clip (`create_drum_pattern`, `create_bassline`, `create_chord_progression` replace any clip in the target slot) carry `destructive_hint: true`, so the client can ask before it runs them. Every other write tool carries `destructive_hint: false`.
+Tools that delete tracks or clips (`arrange_scenes` with `replace=true` deletes the Arrangement's clips), replace a clip's notes or an envelope (`set_clip_envelope`), or write a generated clip (`create_drum_pattern`, `create_bassline`, `create_chord_progression` replace any clip in the target slot) carry `destructive_hint: true`, so the client can ask before it runs them. Every other write tool carries `destructive_hint: false`.
 
 ## Lessons and resources
 
@@ -108,8 +119,22 @@ Guided lessons are MCP prompts. In Claude Code, type `/` and pick one. They take
 | `/ableton:lesson-melody` | A short melody over the chords |
 | `/ableton:lesson-song-structure` | Song sections as scenes, played in order |
 | `/ableton:explain-my-set` | A plain-words tour of your Set; changes nothing |
+| `/ableton:make-track-from-samples` | A 2-4 minute arranged track from your own sample folder |
 
 The lessons follow the chapter order of Ableton's [Learning Music](https://learningmusic.ableton.com) and link each chapter for hands-on practice. The site states no licence, so the lesson texts are our own words and only link to it.
+
+### Full track from your samples
+
+`/ableton:make-track-from-samples` (or asking "make a track from my samples") asks for an absolute sample folder and a genre, then:
+
+1. Scans the folder with `list_samples`, and runs `analyze_sample` on loops whose names give no BPM or key. Without the `hearing` extra it passes on the install hint and goes on from the filename guesses.
+2. Sets the tempo and key from the main loop with `set_tempo` and `set_scale`.
+3. Puts the drum one-shots in one Drum Rack (`load_instrument`, `replace_sample` per pad, `create_drum_pattern`), and each loop on an audio track (`create_audio_track`, `create_audio_clip`). Loops are warped and looped with `set_clip` so their length divides each section. It stays within Lite's 8 tracks and 16 scenes.
+4. Builds scenes Intro, Build, Drop, Break and Outro, and varies them with `create_scene` copies, `copy_clip`, `delete_clip` and `set_clip`.
+5. Adds a build-up to the Build clips with `set_clip_envelope`: a volume rise, or an Auto Filter cutoff sweep (`insert_device`, `read_device`).
+6. Lays out Intro, Build, Drop, Break, Drop, Outro with `arrange_scenes`, sized for 2-4 minutes (minutes = bars x 4 / BPM), and plays it with `play_arrangement`.
+
+It adds no locators. Save with Cmd+S and render with File > Export Audio/Video in Live.
 
 Two read-only resources return the same JSON as their tools. Attach one to a message with `@`:
 
@@ -130,7 +155,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - `read_notes` does not return mute or probability, so a `read_notes` + `write_notes` round trip resets them. Notes that start at or after the clip length never play; `write_notes` reports them as `notes_outside_clip`.
 - `drum_pads` comes from the first Drum Rack on the track: top level first, then one level inside other racks (many Lite kits wrap their Drum Rack in an Instrument Rack). Deeper nesting is not searched.
 - The LOM cannot save the Set. Press Cmd+S yourself.
-- Devices load only through the browser (`load_from_library`, `load_instrument`), so a load replaces the current instrument and is one undo step. `insert_device` adds native Live devices by name without replacing anything; it refuses plug-ins, and Lite lacks some devices (e.g. EQ Eight: use Channel EQ). `live_status` `features` reports `insert_device`, `replace_sample` and `audio_clip`; the three tools refuse before calling Live when theirs is false.
+- Devices load only through the browser (`load_from_library`, `load_instrument`), so a load replaces the current instrument and is one undo step. `insert_device` adds native Live devices by name without replacing anything; it refuses plug-ins, and Lite lacks some devices (e.g. EQ Eight: use Channel EQ). `live_status` `features` reports `insert_device`, `replace_sample`, `audio_clip`, `arrangement` (gates `arrange_scenes`) and `clip_envelopes` (gates `set_clip_envelope`); those tools refuse before calling Live when theirs is false. `play_arrangement` is not gated.
 - `load_instrument` kinds: drift, simpler, impulse, drum_rack, drum_sampler and instrument_rack are in every edition. operator, wavetable, analog and meld (use drift) and sampler (use simpler) are refused on Lite before Live is called. On Standard/Suite they load by browser name; that path is untested.
 - `load_instrument` presets: it searches the kind's browser folder and each folder one level below it (drum_rack: the `drums` root), one `browse` call per folder (14 for Drift on Lite). The first name match in browser order wins; the result returns the loaded `path`. Other presets: `browse_library` + `load_from_library`.
 - Device parameters are raw values between `min` and `max`, not units. Read `display` (Live's own text) after a set and adjust. `display_value` (Live 12.2+) is not used. A parameter with `enabled: false` is controlled by a macro or locked; `set_device_parameters` refuses it.
@@ -143,7 +168,9 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - `create_drum_pattern` picks each voice's pad by a keyword in the pad name first (e.g. "Kick", "Snare", "Hihat Closed"), then by its General MIDI note (36 kick, 38 snare, 42 closed hat, 46 open hat, ...) if no other voice claims that pad by name. Kits with odd or empty pad names can leave voices unresolved; the result lists them in `missing_voices`.
 - Generators replace the clip in the target slot as one undo step. They never create tracks or load instruments. Melodic clips need an instrument on the track, or they play silent.
 - Samples: the server finds a `samples` name by exact file name in Live's Core Library, `~/Music/Ableton/Factory Packs` and the User Library (a full folder walk per call). A name found twice is refused with the paths; pass one as `file_path`. `user_library` paths are joined onto the User Library folder. Only .wav, .aif, .aiff, .flac, .mp3 and .ogg files are taken.
-- Audio clips go into Session slots only; Arrangement placement is not supported. `create_audio_clip` leaves warping to Live; `set_clip` then changes markers, loop, gain, pitch, warping and warp mode. Warp markers are not supported.
+- Clips are made in Session slots; `arrange_scenes` copies them onto the Arrangement. It refuses, before placing anything, a clip whose length does not divide its section (Live cannot trim an Arrangement copy: loop the clip with `set_clip`), an unwarped audio clip (its length is in seconds), and an Arrangement that already has clips unless `replace=true`. Group tracks are skipped. It adds no locators: Live 12.4 placed none when `set_or_delete_cue` ran after setting the song time while stopped. Other Arrangement editing is not supported. `create_audio_clip` leaves warping to Live; `set_clip` then changes markers, loop, gain, pitch, warping and warp mode. Warp markers are not supported.
+- `set_clip_envelope` refuses unwarped audio clips and writes Session clip envelopes only (Live has none for Arrangement clips) and only for the clip's own track: its volume, pan, sends and the parameters of its devices. Device parameter values are raw (`read_device` min..max), not units, and a ramp is linear in raw units, so a cutoff sweep may not sound even. Ramps are 1/16-note steps, not smooth curves. Before the first point the envelope holds the control's value at write time. `arrange_scenes` copies keep the envelope: checked 2026-11-10 on Live 12.4.16 Lite, a volume rise and an Auto Filter sweep both play in the Arrangement.
+- `analyze_sample` is an estimate. Beat trackers often land on half or double the tempo, so it returns both candidates; the key often comes out as its relative major or minor (A minor vs C major). It reads the whole file, a few seconds each. Without the `hearing` extra it returns the install command instead.
 - Live has no API to reverse an audio clip: load the sample into a Simpler and use `set_simpler(reverse=true)`. "Slice to Drum Rack" has no API either: `set_simpler` slices inside one Simpler instead.
 - Turning `warping` off converts an audio clip's markers from beats to seconds (4 beats became 2 s at 120 BPM on 12.4.16), so `set_clip` takes `warping` in its own call; `read_clip` it before setting markers.
 - `set_clip` `gain` is Live's raw 0..1; Live's dB curve is undocumented, so the result shows Live's own `gain_display` text instead of converting.
@@ -153,7 +180,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 
 0. Upgrade only: with the old script still installed, `live_status` returns the `install-script` hint.
 1. `install-script`, restart Live, select AbletonMCP. `Log.txt` shows `AbletonMCP listening` and Python 3.11. `doctor` prints no FAIL and exits 0.
-2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 8`.
+2. `call hello` shows your Live version, edition (`variant`) and `protocol_version: 9`.
 3. `call browse '{"root":"drums","path":[]}'` lists the drum kits.
 4. In Claude Code, ask "make a 1-bar 4/4 drum beat on a new track and play it". You get a new track, a kit, a clip with notes, and sound. Cmd+S still saves.
 5. `undo_last` removes only the last tool's change.
@@ -177,7 +204,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 23. `set_device_parameters` on two Drift parameters: the returned `display` matches Live's UI. One `undo_last` restores both.
 24. Lite only: "use Operator for the lead" gets the refusal, and the agent loads Drift instead.
 25. `uv run python -c "import asyncio; from ableton_mcp import server; print(asyncio.run(server.mcp.read_resource('live://capabilities')))"` shows your Live version, edition and `limits` (`"audio_midi_tracks": 8` on Lite).
-26. In Claude Code, after `/mcp` reconnect: typing `/lesson` lists the six `/ableton:lesson-*` commands, `/ableton:explain-my-set` is there, and typing `@ableton:` offers both `live://` resources.
+26. In Claude Code, after `/mcp` reconnect: typing `/lesson` lists the six `/ableton:lesson-*` commands, `/ableton:explain-my-set` and `/ableton:make-track-from-samples` are there, and typing `@ableton:` offers both `live://` resources.
 27. `/ableton:lesson-first-beat` builds a playing beat step by step, explains the drum roles and tempo, links the Beats chapter, and ends with one Cmd+S reminder and the next lesson's command. `/ableton:explain-my-set` makes no write tool call.
 28. In a fresh session with no lesson, "add an open hi-hat on the off-beats" gets a plain-words summary of the change and one save reminder at the end, not one after each tool call.
 29. With the Vital app closed, ask Claude Code for "a warm detuned supersaw pad". Vital opens with the new preset, and its values match the tool call. With Vital open, the same request starts no second instance, and the preset is in the browser under User. In Live, Vital loaded with `load_from_library` plays the preset with notes from `create_chord_progression`.
@@ -192,15 +219,21 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 37. On that track, `create_audio_clip` with a drum loop from the library, then `set_clip(start_marker=4, end_marker=8, loop_start=4, loop_end=8, looping=true, pitch_coarse=-2, warp_mode="Complex")`: the clip plays bar 2 only, 2 semitones down. `read_clip` shows the same values.
 38. Load a Simpler with `load_instrument(kind="simpler")`, `replace_sample` a drum loop into it, then `set_simpler(device_path=[0], playback_mode="Slicing", slicing_style="Beat", slicing_beat_division="1/8")`: `slice_count` > 1. A clip with note 36 plays the first slice, 37 the second.
 39. `set_simpler(device_path=[0], reverse=true)` plays the sample backwards. One `undo_last` restores it.
+40. Live 12.4 Lite: `live_status` shows `features.arrangement: true`. With a Session clip playing and material in the Arrangement, `play_arrangement(from_bar=3)` stops the Session clip, turns off Back to Arrangement and plays the Arrangement from bar 3. `undo_last` does not undo it.
+41. Live 12.4 Lite: with clips in scenes 0 and 1, `arrange_scenes(sections=[{"scene":0,"bars":4},{"scene":1,"bars":8}])` shows 12 bars of clips in Arrangement View, each scene's clips repeated to fill its section. `play_arrangement` plays them. Calling it again returns the `replace=true` hint; with `replace=true` the old layout is replaced. One `undo_last` removes the whole layout.
+42. With the `hearing` extra, `analyze_sample(file_path="<a loop whose name says its BPM>")` gives that BPM as `bpm_loop`, or as `bpm`, `bpm_half` or `bpm_double` (no Live needed). Checked 2026-11-10 on Live 12.4 Lite's Core Library `Samples/Loops` (170 files with a BPM in their name): `bpm_loop` matched 158, the beat tracker 83.
+43. Live 12.4 Lite: `live_status` shows `features.clip_envelopes: true`. On a 16-beat Session clip, `set_clip_envelope(track=0, slot=0, parameter="volume", points=[{"time":0,"value":-24},{"time":16,"value":0}])` returns `steps: 64`; the clip's Envelopes box shows a stepped volume rise over 4 bars, and it is audible when the clip plays. One `undo_last` removes it.
+44. Live 12.4 Lite: on a track with an Auto Filter after its instrument and a 16-beat Build clip in slot 0, `read_device` on the Auto Filter shows the cutoff name and range (`Frequency`). `set_clip_envelope(track=0, slot=0, device_path=[1], parameter="Frequency", points=[{"time":0,"value":<near min>},{"time":16,"value":<max>}])` returns `steps: 64`; the clip's Envelopes box shows the Auto Filter cutoff rising, and the sweep is audible when the clip plays. A misspelled name returns a "did you mean" error. One `undo_last` removes it.
+45. Live 12.4 Lite: `/ableton:make-track-from-samples` on your own sample folder gives a 2-4 minute Arrangement with named sections that plays from start to end, then reminds you once of Cmd+S and File > Export Audio/Video.
 
 ## Development
 
 ```sh
-uv sync
+uv sync --extra hearing
 uv run pytest -q
 ```
 
-CI (`.github/workflows/test.yml`) runs the suite on Python 3.11 (Live's embedded version) and 3.13 for every push to `main` and every pull request. Keep `src/` and `remote_script/` working on 3.11.
+Without the extra, the librosa tests skip. CI (`.github/workflows/test.yml`) installs the extra and runs the suite on Python 3.11 (Live's embedded version, librosa 0.11) and 3.13 (librosa 1.0) for every push to `main` and every pull request. Keep `src/` and `remote_script/` working on 3.11.
 
 ## License
 

@@ -382,6 +382,96 @@ def test_set_mix_refusals_change_nothing(live):
     assert _err(ops.set_mix, song, app, {"track": 0, "sends": {}}).code == "INVALID_ARG"
 
 
+def _envelope_clip(song, length=16.0):
+    song.create_midi_track(-1)
+    song.tracks[0].clip_slots[0].create_clip(length)
+    return song.tracks[0].mixer_device, song.tracks[0].clip_slots[0].clip
+
+
+def test_set_envelope_volume_ramp(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    points = [{"time": 0, "value": -24}, {"time": 16, "value": 0}]
+    out = ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "volume", "points": points})
+    steps = clip.envelopes[m.volume].steps
+    assert out["steps"] == len(steps) == 64
+    assert m.volume.str_for_value(steps[0][2]) == "-24.0 dB"
+    assert steps[0][:2] == (0.0, 0.25) and steps[-1][0] == 15.75
+    assert m.volume.str_for_value(steps[32][2]) == "-12.0 dB"  # linear in dB
+    assert m.volume.value == 0.85  # the fader itself is untouched
+
+
+def test_set_envelope_pan_send_and_hold_to_clip_end(live):
+    song, app = live
+    m, clip = _envelope_clip(song, 8.0)
+    ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "pan", "points": [{"time": 0, "value": -50}, {"time": 1, "value": 50}]})
+    steps = clip.envelopes[m.panning].steps
+    assert [s[2] for s in steps[:4]] == [-1.0, -0.5, 0.0, 0.5]
+    assert steps[-1] == (1.0, 7.0, 1.0)  # the last value holds to the clip end
+    out = ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "send B", "points": [{"time": 2, "value": -6}]})
+    assert out["steps"] == 1
+    (start, length, value), = clip.envelopes[m.sends[1]].steps
+    assert (start, length, m.sends[1].str_for_value(value)) == (2.0, 6.0, "-6.0 dB")
+
+
+def test_set_envelope_replaces_and_empty_points_only_clear(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    args = {"track": 0, "slot": 0, "parameter": "volume", "points": [{"time": 0, "value": -6}, {"time": 4, "value": 0}]}
+    ops.set_envelope(song, app, args)
+    ops.set_envelope(song, app, args)
+    assert len(clip.envelopes[m.volume].steps) == 17  # 16 ramp steps + the hold, not doubled
+    out = ops.set_envelope(song, app, {**args, "points": []})
+    assert out["steps"] == 0 and m.volume not in clip.envelopes
+    assert clip.cleared == [m.volume, m.volume]
+    ops.set_envelope(song, app, {**args, "points": []})  # nothing to clear: no call
+    assert clip.cleared == [m.volume, m.volume] and clip.envelopes == {}
+
+
+def test_set_envelope_ramp_off_the_sixteenth_grid(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    ops.set_envelope(song, app, {"track": 0, "slot": 0, "parameter": "pan", "points": [{"time": 0, "value": 0}, {"time": 1.1, "value": 11}]})
+    steps = clip.envelopes[m.panning].steps
+    assert [(t, round(d, 6)) for t, d, _ in steps[:5]] == [(0.0, 0.25), (0.25, 0.25), (0.5, 0.25), (0.75, 0.25), (1.0, 0.1)]
+
+
+def test_set_envelope_refuses_unwarped_audio(scenes_set):
+    song, app = scenes_set
+    clip = song.tracks[1].clip_slots[1].clip
+    clip.warping = False
+    e = _err(ops.set_envelope, song, app, {"track": 1, "slot": 1, "parameter": "volume", "points": []})
+    assert e.code == "LIVE_STATE" and "unwarped" in str(e) and clip.cleared == []
+
+
+def test_set_envelope_refusals_write_nothing(live):
+    song, app = live
+    m, clip = _envelope_clip(song)
+    args = {"track": 0, "slot": 0, "parameter": "volume"}
+    ops.set_envelope(song, app, {**args, "points": [{"time": 0, "value": -6}]})
+    before = list(clip.envelopes[m.volume].steps)
+    ok = {"time": 0, "value": -6}
+    bad = [
+        {"parameter": "send C", "points": [ok]},
+        {"parameter": "filter", "points": [ok]},
+        {"points": [ok, {"time": 4, "value": 7}]},  # above +6 dB
+        {"parameter": "pan", "points": [{"time": 0, "value": 51}]},
+        {"points": [ok, {"time": 17, "value": 0}]},  # past the clip end
+        {"points": [{"time": -1, "value": 0}]},
+        {"points": [{"time": 4, "value": 0}, ok]},  # unsorted
+        {"points": [ok, ok]},  # duplicate time
+        {"points": [{"time": "0", "value": 0}]},
+        {"points": [[0, 0]]},
+        {"points": {"time": 0}},
+    ]
+    for extra in bad:
+        assert _err(ops.set_envelope, song, app, {**args, **extra}).code == "INVALID_ARG", extra
+    e = _err(ops.set_envelope, song, app, {**args, "parameter": "send C", "points": [ok]})
+    assert "A, B" in str(e)
+    assert clip.cleared == [] and list(clip.envelopes) == [m.volume] and clip.envelopes[m.volume].steps == before
+    assert _err(ops.set_envelope, song, app, {**args, "slot": 1, "points": [ok]}).code == "NOT_FOUND"
+
+
 def test_create_scene(live):
     song, app = live
     assert ops.create_scene(song, app, {"name": "Outro"}) == {"scene": 8, "name": "Outro", "scene_count": 9}
@@ -534,6 +624,41 @@ def test_set_parameters_refusals_change_nothing(drift_set):
     assert [p.value for p in params] == [1, 0.85, 0, 0.2, 0.5]
 
 
+def test_set_envelope_device_cutoff_ramp_in_raw_values(drift_set):
+    song, app = drift_set
+    song.tracks[0].clip_slots[0].create_clip(16.0)
+    clip = song.tracks[0].clip_slots[0].clip
+    cutoff = song.tracks[0].devices[1].chains[0].devices[0].parameters[1]
+    points = [{"time": 0, "value": 0.2}, {"time": 8, "value": 1.0}]
+    args = {"track": 0, "slot": 0, "device_path": [1, 0, 0], "parameter": "filter freq", "points": points}
+    out = ops.set_envelope(song, app, args)
+    steps = clip.envelopes[cutoff].steps
+    assert out["steps"] == len(steps) == 33  # 32 ramp steps + the hold to the clip end
+    assert steps[0] == (0.0, 0.25, 0.2) and steps[16][2] == pytest.approx(0.6)  # linear in raw units
+    assert steps[-1] == (8.0, 8.0, 1.0) and cutoff.value == 0.85
+    shape = song.tracks[0].devices[1].chains[0].devices[0].parameters[2]
+    ops.set_envelope(song, app, {**args, "parameter": "Osc 1 Shape", "points": [{"time": 0, "value": "saw"}, {"time": 1, "value": 0}]})
+    assert [s[2] for s in clip.envelopes[shape].steps] == [2, 2, 2, 2, 0]  # quantized: held, not interpolated
+
+
+def test_set_envelope_device_refusals_write_nothing(drift_set):
+    song, app = drift_set
+    song.tracks[0].clip_slots[0].create_clip(16.0)
+    clip = song.tracks[0].clip_slots[0].clip
+    args = {"track": 0, "slot": 0, "device_path": [0], "points": [{"time": 0, "value": 0.5}]}
+    e = _err(ops.set_envelope, song, app, {**args, "parameter": "Fliter Freq"})
+    assert e.code == "NOT_FOUND" and "did you mean Filter Freq" in str(e)
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "device_path": [5]}).code == "NOT_FOUND"
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "device_path": ["a"]}).code == "INVALID_ARG"
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Env Amount"}).code == "LIVE_STATE"
+    e = _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "points": [{"time": 0, "value": 1.5}]})
+    assert e.code == "INVALID_ARG" and "point 0" in str(e) and "0.0..1.0" in str(e)
+    for value in ("Noise", 1.5, True):
+        assert _err(ops.set_envelope, song, app, {**args, "parameter": "Osc 1 Shape", "points": [{"time": 0, "value": value}]}).code == "INVALID_ARG"
+    assert _err(ops.set_envelope, song, app, {**args, "parameter": "Filter Freq", "points": [{"time": 0}]}).code == "INVALID_ARG"
+    assert clip.envelopes == {} and clip.cleared == []
+
+
 def test_hello_on_12_4_reports_sample_features():
     install_fake_live_module((12, 4, 16))
     song = Song()
@@ -542,11 +667,113 @@ def test_hello_on_12_4_reports_sample_features():
     assert out["features"]["insert_device"] is True
     assert out["features"]["replace_sample"] is True
     assert out["features"]["audio_clip"] is True
+    assert out["features"]["arrangement"] is True
+    assert out["features"]["clip_envelopes"] is True
 
 
 def test_hello_old_live_lacks_audio_clip(live):
     song, app = live
-    assert ops.hello(song, app, {})["features"]["audio_clip"] is False
+    features = ops.hello(song, app, {})["features"]
+    assert features["audio_clip"] is False and features["arrangement"] is False
+    assert features["clip_envelopes"] is False
+
+
+def test_play_arrangement(live):
+    song, app = live
+    out = ops.play_arrangement(song, app, {"from_bar": 5})
+    assert out == {"from_bar": 5, "song_time": 16.0, "is_playing": True}
+    assert song.clips_stopped and song.back_to_arranger is False
+    assert song.current_song_time == 16.0 and song.is_playing
+
+
+@pytest.mark.parametrize("bar", [0, -1, 1.5, True, "1"])
+def test_play_arrangement_refuses_bad_bar(live, bar):
+    song, app = live
+    assert _err(ops.play_arrangement, song, app, {"from_bar": bar}).code == "INVALID_ARG"
+    assert not song.clips_stopped and not song.is_playing and song.back_to_arranger is True
+
+
+@pytest.fixture
+def scenes_set(live):
+    """Drums: a 4-beat clip in scene 0 and an 8-beat clip in scene 1. Loop: a warped 16-beat audio clip in scene 1 only."""
+    song, app = live
+    song.tracks = [Track("Drums"), Track("Loop", has_midi_input=False)]
+    song.scenes[0].name, song.scenes[1].name = "Intro", "Drop"
+    song.tracks[0].clip_slots[0].clip = Clip(4.0)
+    song.tracks[0].clip_slots[1].clip = Clip(8.0)
+    song.tracks[1].clip_slots[1].clip = Clip(16.0, is_midi_clip=False)
+    return song, app
+
+
+def _placed(track):
+    return [(c.start_time, c.length) for c in track.arrangement_clips]
+
+
+def test_arrange_repeats_clips_end_to_end(scenes_set):
+    song, app = scenes_set
+    out = ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 4}, {"scene": 1, "bars": 8}]})
+    assert out == {"sections": [{"scene": 0, "name": "Intro", "start_bar": 1, "bars": 4},
+                                {"scene": 1, "name": "Drop", "start_bar": 5, "bars": 8}], "total_bars": 12}
+    assert _placed(song.tracks[0]) == [(0.0, 4.0), (4.0, 4.0), (8.0, 4.0), (12.0, 4.0),
+                                       (16.0, 8.0), (24.0, 8.0), (32.0, 8.0), (40.0, 8.0)]
+    assert _placed(song.tracks[1]) == [(16.0, 16.0), (32.0, 16.0)]  # silent in the intro: its slot is empty
+    assert ops.OPS["arrange"] == (ops.arrange, True)  # bridge wraps it in one undo step
+
+
+def test_arrange_skips_group_tracks(scenes_set):
+    song, app = scenes_set
+    group = Track("Group", has_midi_input=False)
+    group.is_foldable = True
+    song.tracks.insert(0, group)
+    ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 1}]})
+    assert group.arrangement_clips == [] and _placed(song.tracks[1]) == [(0.0, 4.0)]
+
+
+def test_arrange_refusals_place_nothing(scenes_set):
+    song, app = scenes_set
+    song.tracks[0].clip_slots[2].clip = Clip(12.0)
+    song.tracks[1].clip_slots[3].clip = Clip(8.0, is_midi_clip=False)
+    song.tracks[1].clip_slots[3].clip.warping = False
+    ok = {"scene": 0, "bars": 4}
+    cases = [
+        ([ok, {"scene": 2, "bars": 4}], "INVALID_ARG", "set_clip"),  # 12 beats do not divide 16
+        ([ok, {"scene": 3, "bars": 4}], "LIVE_STATE", "unwarped"),
+        ([ok, {"scene": 8, "bars": 4}], "NOT_FOUND", "no scene 8"),
+        ([ok, {"scene": -1, "bars": 4}], "INVALID_ARG", "scene"),
+        ([{"scene": 0, "bars": 0}], "INVALID_ARG", "1..256"),
+        ([{"scene": 0, "bars": 257}], "INVALID_ARG", "1..256"),
+        ([{"scene": 0, "bars": 4.0}], "INVALID_ARG", "1..256"),
+        ([{"scene": 0, "bars": True}], "INVALID_ARG", "1..256"),
+        ([], "INVALID_ARG", "non-empty"),
+    ]
+    for sections, code, text in cases:
+        with pytest.raises(OpError) as e:
+            ops.arrange(song, app, {"sections": sections})
+        assert e.value.code == code and text in str(e.value), sections
+    assert _err(ops.arrange, song, app, {"sections": [ok], "replace": "yes"}).code == "INVALID_ARG"
+    assert all(t.arrangement_clips == [] for t in song.tracks)
+
+
+def test_arrange_refuses_a_full_arrangement_unless_replace(scenes_set):
+    song, app = scenes_set
+    old = Clip(4.0)
+    song.tracks[1].arrangement_clips = [old]
+    e = _err(ops.arrange, song, app, {"sections": [{"scene": 0, "bars": 1}]})
+    assert e.code == "LIVE_STATE" and "replace=true" in str(e)
+    assert song.tracks[0].arrangement_clips == [] and song.tracks[1].arrangement_clips == [old]
+    ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 1}], "replace": True})
+    assert old not in song.tracks[1].arrangement_clips
+    assert _placed(song.tracks[0]) == [(0.0, 4.0)] and _placed(song.tracks[1]) == []
+
+
+def test_arrange_replace_with_a_bad_section_keeps_old_clips(scenes_set):
+    song, app = scenes_set
+    old = Clip(4.0)
+    song.tracks[1].arrangement_clips = [old]
+    for sections in ([{"scene": 0, "bars": 1}, {"scene": 9, "bars": 1}], [{"scene": 0, "bars": 256}] * 1541):
+        e = _err(ops.arrange, song, app, {"sections": sections, "replace": True})  # 1541 x 256 bars passes MAX_BAR
+        assert "no scene 9" in str(e) or "Arrangement ends at bar" in str(e)
+        assert song.tracks[1].arrangement_clips == [old] and song.tracks[0].arrangement_clips == []
 
 
 @pytest.fixture

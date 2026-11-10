@@ -1,9 +1,10 @@
-"""MCP stdio server: 36 tools. 34 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
-Vital synth presets as files (vital.py) and work without Live.
+"""MCP stdio server: 41 tools. 37 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+Vital synth presets as files (vital.py), 1 lists a folder of the user's samples (samples.py) and 1 estimates a
+sample's tempo and key (hearing.py, optional librosa extra); those 4 work without Live.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
-Server instructions (sent once per session), 7 guided-lesson prompts and 2 read-only resources
+Server instructions (sent once per session), 8 prompts (6 guided lessons, explain-my-set, make-track-from-samples) and 2 read-only resources
 (live://capabilities, live://set/overview) are registered below; their texts live in lessons.py.
 Tests replace the module global `client` with a fake.
 """
@@ -16,7 +17,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from . import lessons, midifile, samples, theory, vital
+from . import hearing, lessons, midifile, samples, theory, vital
 from .live_client import INSTALL_HINT, PROTOCOL_VERSION, LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
@@ -69,6 +70,18 @@ PLAYBACK_MODES = ("Classic", "One-Shot", "Slicing")
 SLICING_PLAYBACK_MODES = ("Mono", "Poly", "Thru")
 SLICING_STYLES = ("Transient", "Beat", "Region", "Manual")
 BEAT_DIVISIONS = ("1/16", "1/16T", "1/8", "1/8T", "1/4", "1/4T", "1/2", "1/2T", "1 Bar", "2 Bars", "4 Bars")
+
+
+@dataclass
+class Section:
+    scene: int  # scene index, as in get_set_overview
+    bars: int  # 1-256 bars of 4/4
+
+
+@dataclass
+class EnvelopePoint:
+    time: float  # beats from the clip start, 0..clip length
+    value: float | str  # dB for volume and sends, -50..50 for pan, raw min..max (or an item name) for a device parameter
 
 
 @dataclass
@@ -547,6 +560,39 @@ def _sample_file(root: str | None, path: list[str] | None, file_path: str | None
         return _error(str(e))
 
 
+@mcp.tool(annotations=READ_ONLY)
+def list_samples(folder: str, limit: int = 100) -> CallToolResult:
+    """List the audio files under a folder of the user's samples, recursively; works without Live.
+    folder: an absolute path. Returns total (all files found) and files (sorted by path, at most limit, default 100; when total is larger,
+scan a subfolder rather than raising limit, as each file adds about 230 characters), each with
+    path, name, duration_s (PCM WAV, or any format with the hearing extra; else null) and guesses from the filename: role (kick, snare, clap, hat, perc,
+    bass, vocal, pad, chord, lead, fx or null), kind (loop, one_shot or unknown), bpm and key (null when the name
+    does not say). Pass a file's path as file_path to create_audio_clip or replace_sample."""
+    try:
+        return _ok(samples.scan(folder, limit))
+    except ValueError as e:
+        return _error(str(e))
+
+
+@mcp.tool(annotations=READ_ONLY)
+def analyze_sample(file_path: str) -> CallToolResult:
+    """Estimate an audio file's tempo and key from its sound; works without Live. Use it when list_samples shows
+    bpm or key as null. file_path: an absolute path. Returns bpm with bpm_half and bpm_double (beat trackers often
+    land on one of those, so pick the one that fits the music), bpm_loop (the tempo in 80..160 that makes the file
+1..16 whole bars of 4/4; prefer it for loops, null when none fits), key such as "A minor" with key_confidence
+    (correlation, up to 1; relative major/minor mix-ups are common), and duration_s. Takes a few seconds per file.
+    Needs the optional hearing extra; without it the error says how to install it."""
+    path = _sample_file(None, None, file_path)
+    if isinstance(path, CallToolResult):
+        return path
+    try:
+        return _ok(hearing.analyze(path))
+    except ImportError:
+        return _error(hearing.INSTALL_HINT)
+    except ValueError as e:
+        return _error(str(e))
+
+
 @mcp.tool(annotations=WRITES)
 def create_audio_clip(
     track: int, slot: int, root: SampleRoot | None = None, path: list[str] | None = None,
@@ -654,6 +700,31 @@ def set_track_mix(
     return _call("set_mix", {"track": track, **{k: v for k, v in fields.items() if v is not None}})
 
 
+@mcp.tool(annotations=DESTRUCTIVE)
+def set_clip_envelope(
+    track: int, slot: int, parameter: str, points: list[EnvelopePoint], device_path: list[int] | None = None,
+) -> CallToolResult:
+    """Automate the track's own volume, pan, a send, or a device parameter inside one Session clip,
+    e.g. a volume rise or a filter cutoff sweep over a Build clip.
+    Without device_path, parameter is "volume" or "send A", "send B", ... (values in dB; volume max +6, sends max 0), or "pan"
+    (-50 = 50L .. 50 = 50R). With device_path (a device on this same track, as in read_device), parameter is that
+    device's parameter name as read_device shows it (case ignored), and values are raw, between the min and max
+    read_device shows (not units); a switch (quantized) parameter takes one of its items or a whole number.
+    points: [{time, value}] with time in beats from the clip start (0..clip length), in rising time order,
+    e.g. [{"time": 0, "value": -24}, {"time": 16, "value": 0}]. Between two points the value ramps in 1/16-note
+    steps (linear in dB, pan or raw units; a switch holds each point's item until the next point); after the last
+    point it holds to the clip end; before the first point it stays at the control's current value.
+    Replaces that control's envelope in the clip; points=[] only clears it. Unwarped audio clips are refused (their length is in seconds). All-or-nothing, one undo step.
+    The envelope plays whenever the clip plays; arrange_scenes copies the clip to the Arrangement. Needs Live 12.4+."""
+    refused = _needs("clip_envelopes", "12.4")
+    if refused:
+        return refused
+    args = {"track": track, "slot": slot, "parameter": parameter, "points": [asdict(p) for p in points]}
+    if device_path is not None:
+        args["device_path"] = device_path
+    return _call("set_envelope", args)
+
+
 @mcp.tool(annotations=WRITES)
 def set_label(
     track: int | None = None,
@@ -692,6 +763,28 @@ def fire_scene(scene: int) -> CallToolResult:
 def stop() -> CallToolResult:
     """Stop playback."""
     return _call("stop")
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def arrange_scenes(sections: list[Section], replace: bool = False) -> CallToolResult:
+    """Lay scenes out as song sections on the Arrangement (the timeline), end to end from bar 1, e.g.
+    [{"scene": 0, "bars": 8}, {"scene": 1, "bars": 16}]. Each track's clip in that scene repeats to fill the section;
+    a track with an empty slot is silent there. Each clip's length in beats must divide bars*4 (loop it with set_clip
+    if not), and unwarped audio clips are refused. An Arrangement that already has clips is refused unless replace=true,
+    which deletes them all first. Returns each section's start_bar and the total_bars. One undo step; then
+    play_arrangement to hear it. Assumes 4/4. Needs Live 12.4+."""
+    refused = _needs("arrangement", "12.4")
+    if refused:
+        return refused
+    return _call("arrange", {"sections": [asdict(s) for s in sections], "replace": replace})
+
+
+@mcp.tool(annotations=WRITES)
+def play_arrangement(from_bar: int = 1) -> CallToolResult:
+    """Play the Arrangement (the timeline) from this bar; 1 is the start. Stops every Session clip first,
+    because playing Session clips override the Arrangement. Assumes 4/4. Not an undo step."""
+    # Not gated: stop_all_clips, back_to_arranger, current_song_time and start_playing predate Live 12.
+    return _call("play_arrangement", {"from_bar": from_bar})
 
 
 @mcp.tool(annotations=WRITES)
@@ -825,6 +918,12 @@ def lesson_song_structure() -> str:
 def explain_my_set() -> str:
     """Describe the open Set in plain words (tempo, key, each track's role) without changing it."""
     return lessons.EXPLAIN_MY_SET
+
+
+@mcp.prompt(name="make-track-from-samples", title="Make a track from my samples")
+def make_track_from_samples() -> str:
+    """Turn a folder of samples into a 2-4 minute arranged track: tempo, key, drums, loops, sections, build-up."""
+    return lessons.MAKE_TRACK_FROM_SAMPLES
 
 
 def main():

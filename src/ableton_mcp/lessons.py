@@ -28,9 +28,10 @@ This server drives the user's open Ableton Live Set in Session View. Assume the 
 - For a synth sound the user describes ("a warm pad"), build a Vital preset with `vital_create_preset`; it needs no Live. If the Vital app is closed, the tool opens it with the preset; otherwise pass on its how_to_load text (pick the preset in Vital's browser under User). When the user plays Vital inside Live, load Vital on the track with `load_from_library` (plugins root) and pass `open=false`.
 - For real audio samples, use only sounds from Live's library or files the user gives you. Find one with `browse_library` (root samples or user_library), then put it in a clip slot of an audio track with `create_audio_clip`, or swap a Simpler's or a Drum Rack pad's sound with `replace_sample`. Add effects such as a Limiter on Main with `insert_device`.
 - To chop a sample: make an audio track with `create_audio_track` and trim, loop, pitch or warp its clip with `set_clip`; or load a Simpler, `replace_sample`, then `set_simpler` (playback_mode Slicing) and `write_notes` from note 36 upward, one note per slice (36 plays the first slice).
+- For a full song, make each section a scene, lay them out on the Arrangement with `arrange_scenes` and play it with `play_arrangement`. Add a build-up inside a clip with `set_clip_envelope`.
 - Live cannot be saved from here. When you finish a task that changed the Set, end with one short reminder to press Cmd+S (Ctrl+S on Windows). Do not remind after each tool call, and do not remind when nothing changed.
 
-Guided lessons, in order (MCP prompts the user starts from the / menu): lesson-first-beat, lesson-notes-and-scales, lesson-chords, lesson-bassline, lesson-melody, lesson-song-structure. explain-my-set describes the Set without changing it.
+Guided lessons, in order (MCP prompts the user starts from the / menu): lesson-first-beat, lesson-notes-and-scales, lesson-chords, lesson-bassline, lesson-melody, lesson-song-structure. explain-my-set describes the Set without changing it. When the user asks to make a track from their samples, follow the make-track-from-samples prompt.
 """
 
 
@@ -149,4 +150,23 @@ Explain my Live Set to me. Do not change anything: use only `live_status`, `get_
 3. If there are scenes, say what each one seems to be for.
 4. Point out one thing that works well and one idea to try next.
 5. Recommend the Learning Music chapter that fits that idea (https://learningmusic.ableton.com) and the matching lesson prompt from this server's list.
+"""
+
+MAKE_TRACK_FROM_SAMPLES = """\
+Make me a full track from my own samples. I am new to making music.
+
+Goal: a 2 to 4 minute track in Live's Arrangement (the timeline) with named sections, playing from start to end.
+
+Idea to explain first, in two or three sentences of your own: a loop is a sample that repeats in time, and a one-shot is a single hit such as a kick. A track grows from a few loops by turning parts on and off across sections: an intro, a build that raises tension, a drop where everything plays, a break that pulls back, and an outro.
+
+Steps (tell me what you did after each one, and stop where I need to choose):
+1. Ask me for the absolute path of my sample folder and the genre or mood I want.
+2. Scan it with `list_samples`. Pick a main loop and the parts that fit it. For the loops you will use that have no bpm or key, call `analyze_sample` and prefer its bpm_loop value for loops; if it returns the install hint, pass that hint on to me and continue from the filename guesses. A tempo estimate can be half or double the real tempo, so pick the one that fits the genre.
+3. Check Live with `live_status` and `get_set_overview`. Set the tempo from the main loop's BPM with `set_tempo`, and the key from its key with `set_scale`. Explain tempo and key in a sentence each.
+4. Drums: one MIDI track with one Drum Rack. Use `load_instrument` with kind drum_rack and a kit preset, then `replace_sample` with my kick, snare (or clap) and hi-hat one-shots on their pads (it works only on pads that hold a Simpler; the 808 Core Kit's pads hold other devices, so if it is refused, keep the kit's own sounds and tell me) (pad_note from the drum_pads in `get_set_overview`), and write the beat with `create_drum_pattern`. Loops: one audio track per loop, with `create_audio_track` and `create_audio_clip` (file_path). Turn warping on with `set_clip` so each loop follows the tempo, check its length with `read_clip`, and loop it with `set_clip` to 1, 2, 4 or 8 bars so it divides every section. Stay within Lite's 8 tracks and 16 scenes, and reuse empty tracks and scenes first.
+5. Sections: scenes named Intro, Build, Drop, Break and Outro, made with `create_scene` and named and coloured with `set_label`. Build the Drop first with every part, copy it with `create_scene` (copy_of) or `copy_clip`, then thin each copy out with `delete_clip` (silence a part) or change a clip with `set_clip`. The second Drop can reuse the Drop scene, or be a copy with one extra part.
+6. Build-up: on the Build clips, add a volume rise with `set_clip_envelope`, or a filter sweep: `insert_device` Auto Filter on the track, `read_device` for its Frequency name and range, then `set_clip_envelope` with that device_path from near the minimum to the maximum over the clip. Explain what a filter does. Clip envelopes carry into the Arrangement.
+7. Arrange with `arrange_scenes`: Intro, Build, Drop, Break, Drop, Outro, each section a whole number of times every clip length in its scene. Show me the arithmetic: minutes = bars x 4 / BPM, and aim for 2 to 4 minutes (for example 8 + 16 + 32 + 16 + 32 + 8 = 112 bars at 124 BPM is 448 / 124, about 3.6 minutes). Then play it with `play_arrangement`.
+
+To finish: tell me that no section markers (locators) were added, so I can add them in Arrangement View if I want them. Remind me once to press Cmd+S (Ctrl+S on Windows) to save the Set, and to use File > Export Audio/Video to render the track to an audio file.
 """

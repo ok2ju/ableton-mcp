@@ -1,10 +1,14 @@
 [project]
 name = "ableton-mcp"
-version = "0.6.0"
+version = "0.7.0"
 description = "MCP server that drives Ableton Live 12 through a stdlib-only Remote Script."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["mcp[cli]>=2.3,<3"]
+
+[project.optional-dependencies]
+# BPM and key detection for analyze_sample, imported only when the tool runs.
+hearing = ["librosa>=0.11"]
 
 [project.scripts]
 ableton-mcp = "ableton_mcp.cli:main"

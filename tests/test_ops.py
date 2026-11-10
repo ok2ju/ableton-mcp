@@ -542,11 +542,28 @@ def test_hello_on_12_4_reports_sample_features():
     assert out["features"]["insert_device"] is True
     assert out["features"]["replace_sample"] is True
     assert out["features"]["audio_clip"] is True
+    assert out["features"]["arrangement"] is True
 
 
 def test_hello_old_live_lacks_audio_clip(live):
     song, app = live
-    assert ops.hello(song, app, {})["features"]["audio_clip"] is False
+    features = ops.hello(song, app, {})["features"]
+    assert features["audio_clip"] is False and features["arrangement"] is False
+
+
+def test_play_arrangement(live):
+    song, app = live
+    out = ops.play_arrangement(song, app, {"from_bar": 5})
+    assert out == {"from_bar": 5, "song_time": 16.0, "is_playing": True}
+    assert song.clips_stopped and song.back_to_arranger is False
+    assert song.current_song_time == 16.0 and song.is_playing
+
+
+@pytest.mark.parametrize("bar", [0, -1, 1.5, True, "1"])
+def test_play_arrangement_refuses_bad_bar(live, bar):
+    song, app = live
+    assert _err(ops.play_arrangement, song, app, {"from_bar": bar}).code == "INVALID_ARG"
+    assert not song.clips_stopped and not song.is_playing and song.back_to_arranger is True
 
 
 @pytest.fixture

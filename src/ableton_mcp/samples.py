@@ -6,7 +6,7 @@ file names whose files sit in nested folders on disk. So the server finds the fi
 in Live's own library folders. Every path comes from Path.home() at call time, so tests can point it elsewhere.
 
 scan() lists the audio files in a folder the user names, each with a guess from its filename at its role,
-kind, BPM and key, and its duration where the standard library can read it.
+kind, BPM and key, and its duration where the standard library (or soundfile, with the hearing extra) can read it.
 """
 
 import os
@@ -96,13 +96,21 @@ ROLE_WORDS = {
 
 
 def _duration(path: Path) -> float | None:
-    """Seconds, from stdlib wave for integer-PCM WAV; None for anything it cannot read."""
-    if path.suffix.lower() != ".wav":
+    """Seconds: stdlib wave for integer-PCM WAV, else soundfile when the hearing extra is installed; None for
+    anything neither can read."""
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path)) as w:
+                return round(w.getnframes() / w.getframerate(), 3)
+        except (wave.Error, EOFError, OSError, ZeroDivisionError):
+            pass  # float WAV, WAVE_FORMAT_EXTENSIBLE or junk: let soundfile try
+    try:
+        import soundfile  # a librosa dependency, so present only with the hearing extra
+    except ImportError:
         return None
     try:
-        with wave.open(str(path)) as w:
-            return round(w.getnframes() / w.getframerate(), 3)
-    except (wave.Error, EOFError, OSError, ZeroDivisionError):
+        return round(soundfile.info(str(path)).duration, 3)
+    except (RuntimeError, OSError):  # soundfile.LibsndfileError is a RuntimeError; older libsndfile lacks mp3
         return None
 
 

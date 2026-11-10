@@ -577,7 +577,8 @@ def list_samples(folder: str, limit: int = 200) -> CallToolResult:
 def analyze_sample(file_path: str) -> CallToolResult:
     """Estimate an audio file's tempo and key from its sound; works without Live. Use it when list_samples shows
     bpm or key as null. file_path: an absolute path. Returns bpm with bpm_half and bpm_double (beat trackers often
-    land on one of those, so pick the one that fits the music), key such as "A minor" with key_confidence
+    land on one of those, so pick the one that fits the music), bpm_loop (the tempo in 80..160 that makes the file
+1..16 whole bars of 4/4; prefer it for loops, null when none fits), key such as "A minor" with key_confidence
     (correlation, up to 1; relative major/minor mix-ups are common), and duration_s. Takes a few seconds per file.
     Needs the optional hearing extra; without it the error says how to install it."""
     path = _sample_file(None, None, file_path)

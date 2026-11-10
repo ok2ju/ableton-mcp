@@ -183,12 +183,18 @@ class Track:
         self.devices = []
         self.view = types.SimpleNamespace(selected_device=None)
         self.clip_slots = [ClipSlot() for _ in range(scenes)]
+        self.arrangement_clips = []
 
     def create_midi_clip(self, start_time, length):  # arrangement, 12.1.10+
         raise NotImplementedError
 
     def duplicate_clip_to_arrangement(self, clip, destination_time):  # hello's `arrangement` feature
-        raise NotImplementedError
+        placed = copy.deepcopy(clip)
+        placed.start_time = destination_time
+        self.arrangement_clips = self.arrangement_clips + [placed]
+
+    def delete_clip(self, clip):  # arrangement clips
+        self.arrangement_clips = [c for c in self.arrangement_clips if c is not clip]
 
     def insert_device(self, device_name, target_index=None):  # 12.3+, native devices only
         if device_name not in NATIVE_DEVICES:

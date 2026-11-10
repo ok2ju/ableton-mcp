@@ -2,7 +2,7 @@
 
 MCP server that lets an MCP client (Claude Code) drive Ableton Live 12.1+ (Lite included) through a stdlib-only Remote Script. It also builds and reads presets for the free [Vital](https://vital.audio/) synth, and has an offline `.mid` writer. Both work with Live closed.
 
-Tested on Live 12.1.10 Lite (embedded Python 3.11.6) and Vital 1.5.5, macOS. Builds in Session View only; `play_arrangement` plays the Arrangement.
+Tested on Live 12.1.10 Lite (embedded Python 3.11.6) and Vital 1.5.5, macOS. Builds in Session View; `arrange_scenes` lays scenes out on the Arrangement and `play_arrangement` plays it.
 
 ## How it works
 
@@ -47,7 +47,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 38 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 39 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -85,6 +85,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `play_clip` | Fire a clip | no |
 | `fire_scene` | Launch every clip in a scene (not an undo step) | no |
 | `stop` | Stop playback | no |
+| `arrange_scenes` | Lay scenes end to end on the Arrangement from bar 1 as `sections` `[{scene, bars}]` (bars 1-256, 4/4); each clip repeats to fill its section, an empty slot is silent; returns each section's `start_bar` and `total_bars`. A non-empty Arrangement is refused unless `replace=true`, which deletes its clips first (destructive, one undo step; Live 12.4+) | no |
 | `play_arrangement` | Stop all Session clips and play the Arrangement from `from_bar` (default 1, 4/4); not an undo step. Needs `features.arrangement` in `live_status` (Live 12.4+) | no |
 | `undo_last` | Undo the last change | no |
 | `write_midi_file` | Write a `.mid` to `~/Music/ableton-mcp/midi/` without Live | no |
@@ -93,7 +94,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 If Live or the Remote Script is not reachable, or the script reports an error, the tool returns an `isError` result with the reason.
 
-Tools that delete tracks or clips, replace a clip's notes, or write a generated clip (`create_drum_pattern`, `create_bassline`, `create_chord_progression` replace any clip in the target slot) carry `destructive_hint: true`, so the client can ask before it runs them. Every other write tool carries `destructive_hint: false`.
+Tools that delete tracks or clips (`arrange_scenes` with `replace=true` deletes the Arrangement's clips), replace a clip's notes, or write a generated clip (`create_drum_pattern`, `create_bassline`, `create_chord_progression` replace any clip in the target slot) carry `destructive_hint: true`, so the client can ask before it runs them. Every other write tool carries `destructive_hint: false`.
 
 ## Lessons and resources
 
@@ -145,7 +146,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - `create_drum_pattern` picks each voice's pad by a keyword in the pad name first (e.g. "Kick", "Snare", "Hihat Closed"), then by its General MIDI note (36 kick, 38 snare, 42 closed hat, 46 open hat, ...) if no other voice claims that pad by name. Kits with odd or empty pad names can leave voices unresolved; the result lists them in `missing_voices`.
 - Generators replace the clip in the target slot as one undo step. They never create tracks or load instruments. Melodic clips need an instrument on the track, or they play silent.
 - Samples: the server finds a `samples` name by exact file name in Live's Core Library, `~/Music/Ableton/Factory Packs` and the User Library (a full folder walk per call). A name found twice is refused with the paths; pass one as `file_path`. `user_library` paths are joined onto the User Library folder. Only .wav, .aif, .aiff, .flac, .mp3 and .ogg files are taken.
-- Audio clips go into Session slots only; Arrangement placement is not supported. `create_audio_clip` leaves warping to Live; `set_clip` then changes markers, loop, gain, pitch, warping and warp mode. Warp markers are not supported.
+- Clips are made in Session slots; `arrange_scenes` copies them onto the Arrangement. It refuses, before placing anything, a clip whose length does not divide its section (Live cannot trim an Arrangement copy: loop the clip with `set_clip`), an unwarped audio clip (its length is in seconds), and an Arrangement that already has clips unless `replace=true`. Group tracks are skipped. Other Arrangement editing is not supported. `create_audio_clip` leaves warping to Live; `set_clip` then changes markers, loop, gain, pitch, warping and warp mode. Warp markers are not supported.
 - Live has no API to reverse an audio clip: load the sample into a Simpler and use `set_simpler(reverse=true)`. "Slice to Drum Rack" has no API either: `set_simpler` slices inside one Simpler instead.
 - Turning `warping` off converts an audio clip's markers from beats to seconds (4 beats became 2 s at 120 BPM on 12.4.16), so `set_clip` takes `warping` in its own call; `read_clip` it before setting markers.
 - `set_clip` `gain` is Live's raw 0..1; Live's dB curve is undocumented, so the result shows Live's own `gain_display` text instead of converting.
@@ -195,6 +196,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 38. Load a Simpler with `load_instrument(kind="simpler")`, `replace_sample` a drum loop into it, then `set_simpler(device_path=[0], playback_mode="Slicing", slicing_style="Beat", slicing_beat_division="1/8")`: `slice_count` > 1. A clip with note 36 plays the first slice, 37 the second.
 39. `set_simpler(device_path=[0], reverse=true)` plays the sample backwards. One `undo_last` restores it.
 40. Live 12.4 Lite: `live_status` shows `features.arrangement: true`. With a Session clip playing and material in the Arrangement, `play_arrangement(from_bar=3)` stops the Session clip, turns off Back to Arrangement and plays the Arrangement from bar 3. `undo_last` does not undo it.
+41. Live 12.4 Lite: with clips in scenes 0 and 1, `arrange_scenes(sections=[{"scene":0,"bars":4},{"scene":1,"bars":8}])` shows 12 bars of clips in Arrangement View, each scene's clips repeated to fill its section. `play_arrangement` plays them. Calling it again returns the `replace=true` hint; with `replace=true` the old layout is replaced. One `undo_last` removes the whole layout.
 
 ## Development
 

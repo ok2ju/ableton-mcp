@@ -567,6 +567,79 @@ def test_play_arrangement_refuses_bad_bar(live, bar):
 
 
 @pytest.fixture
+def scenes_set(live):
+    """Drums: a 4-beat clip in scene 0 and an 8-beat clip in scene 1. Loop: a warped 16-beat audio clip in scene 1 only."""
+    song, app = live
+    song.tracks = [Track("Drums"), Track("Loop", has_midi_input=False)]
+    song.scenes[0].name, song.scenes[1].name = "Intro", "Drop"
+    song.tracks[0].clip_slots[0].clip = Clip(4.0)
+    song.tracks[0].clip_slots[1].clip = Clip(8.0)
+    song.tracks[1].clip_slots[1].clip = Clip(16.0, is_midi_clip=False)
+    return song, app
+
+
+def _placed(track):
+    return [(c.start_time, c.length) for c in track.arrangement_clips]
+
+
+def test_arrange_repeats_clips_end_to_end(scenes_set):
+    song, app = scenes_set
+    out = ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 4}, {"scene": 1, "bars": 8}]})
+    assert out == {"sections": [{"scene": 0, "name": "Intro", "start_bar": 1, "bars": 4},
+                                {"scene": 1, "name": "Drop", "start_bar": 5, "bars": 8}], "total_bars": 12}
+    assert _placed(song.tracks[0]) == [(0.0, 4.0), (4.0, 4.0), (8.0, 4.0), (12.0, 4.0),
+                                       (16.0, 8.0), (24.0, 8.0), (32.0, 8.0), (40.0, 8.0)]
+    assert _placed(song.tracks[1]) == [(16.0, 16.0), (32.0, 16.0)]  # silent in the intro: its slot is empty
+    assert ops.OPS["arrange"] == (ops.arrange, True)  # bridge wraps it in one undo step
+
+
+def test_arrange_skips_group_tracks(scenes_set):
+    song, app = scenes_set
+    group = Track("Group", has_midi_input=False)
+    group.is_foldable = True
+    song.tracks.insert(0, group)
+    ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 1}]})
+    assert group.arrangement_clips == [] and _placed(song.tracks[1]) == [(0.0, 4.0)]
+
+
+def test_arrange_refusals_place_nothing(scenes_set):
+    song, app = scenes_set
+    song.tracks[0].clip_slots[2].clip = Clip(12.0)
+    song.tracks[1].clip_slots[3].clip = Clip(8.0, is_midi_clip=False)
+    song.tracks[1].clip_slots[3].clip.warping = False
+    ok = {"scene": 0, "bars": 4}
+    cases = [
+        ([ok, {"scene": 2, "bars": 4}], "INVALID_ARG", "set_clip"),  # 12 beats do not divide 16
+        ([ok, {"scene": 3, "bars": 4}], "LIVE_STATE", "unwarped"),
+        ([ok, {"scene": 8, "bars": 4}], "NOT_FOUND", "no scene 8"),
+        ([ok, {"scene": -1, "bars": 4}], "INVALID_ARG", "scene"),
+        ([{"scene": 0, "bars": 0}], "INVALID_ARG", "1..256"),
+        ([{"scene": 0, "bars": 257}], "INVALID_ARG", "1..256"),
+        ([{"scene": 0, "bars": 4.0}], "INVALID_ARG", "1..256"),
+        ([{"scene": 0, "bars": True}], "INVALID_ARG", "1..256"),
+        ([], "INVALID_ARG", "non-empty"),
+    ]
+    for sections, code, text in cases:
+        with pytest.raises(OpError) as e:
+            ops.arrange(song, app, {"sections": sections})
+        assert e.value.code == code and text in str(e.value), sections
+    assert _err(ops.arrange, song, app, {"sections": [ok], "replace": "yes"}).code == "INVALID_ARG"
+    assert all(t.arrangement_clips == [] for t in song.tracks)
+
+
+def test_arrange_refuses_a_full_arrangement_unless_replace(scenes_set):
+    song, app = scenes_set
+    old = Clip(4.0)
+    song.tracks[1].arrangement_clips = [old]
+    e = _err(ops.arrange, song, app, {"sections": [{"scene": 0, "bars": 1}]})
+    assert e.code == "LIVE_STATE" and "replace=true" in str(e)
+    assert song.tracks[0].arrangement_clips == [] and song.tracks[1].arrangement_clips == [old]
+    ops.arrange(song, app, {"sections": [{"scene": 0, "bars": 1}], "replace": True})
+    assert old not in song.tracks[1].arrangement_clips
+    assert _placed(song.tracks[0]) == [(0.0, 4.0)] and _placed(song.tracks[1]) == []
+
+
+@pytest.fixture
 def wav(tmp_path):
     path = tmp_path / "Atmos Calm 130 bpm.wav"
     path.write_bytes(b"RIFF")

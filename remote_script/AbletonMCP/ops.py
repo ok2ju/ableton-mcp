@@ -656,6 +656,55 @@ def play_arrangement(song, app, args):
     return {"from_bar": bar, "song_time": song.current_song_time, "is_playing": True}
 
 
+MAX_SECTION_BARS = 256
+
+
+def arrange(song, app, args):
+    """Lay scenes end to end on the Arrangement from beat 0. Each track's clip in a section's scene is copied
+    and repeated to fill the section; an empty slot is silent there. Validates all before writing any. Assumes 4/4."""
+    sections = args["sections"]
+    if not isinstance(sections, list) or not sections:
+        raise OpError("INVALID_ARG", "sections must be a non-empty list of {scene, bars}")
+    replace = args.get("replace", False)
+    if not isinstance(replace, bool):
+        raise OpError("INVALID_ARG", "replace must be true or false")
+    tracks = [(t, track) for t, track in enumerate(song.tracks) if not track.is_foldable]  # group tracks hold no clips
+    placements, result, start = [], [], 0.0  # placements: (track, clip, first beat, copies)
+    for section in sections:
+        scene = _scene(song, section)
+        i = section["scene"]
+        bars = _whole(section, "bars", 1, MAX_SECTION_BARS)
+        beats = bars * 4.0
+        for t, track in tracks:
+            slot = list(track.clip_slots)[i]
+            if not slot.has_clip:
+                continue
+            clip = slot.clip
+            if not clip.is_midi_clip and not clip.warping:
+                raise OpError("LIVE_STATE", f"track {t}, scene {i}: the audio clip is unwarped, so its length is in "
+                                            "seconds; set_clip warping true first")
+            copies = beats / clip.length
+            if copies != int(copies):
+                raise OpError("INVALID_ARG", f"track {t}, scene {i}: the {clip.length:g}-beat clip does not fill "
+                                             f"{bars} bars ({beats:g} beats) evenly; loop it to a length that divides "
+                                             "it with set_clip, or change bars")
+            placements.append((track, clip, start, int(copies)))
+        result.append({"scene": i, "name": scene.name, "start_bar": int(start) // 4 + 1, "bars": bars})
+        start += beats
+    if start > MAX_BAR * 4:
+        raise OpError("INVALID_ARG", f"the sections add up to {int(start) // 4} bars; Live's Arrangement ends at bar {MAX_BAR}")
+    existing = [(track, clip) for _, track in tracks for clip in track.arrangement_clips]
+    if existing and not replace:
+        raise OpError("LIVE_STATE", f"the Arrangement already has {len(existing)} clips; "
+                                    "pass replace=true to delete them first")
+    for track, clip in existing:
+        track.delete_clip(clip)
+    for track, clip, first, copies in placements:
+        for n in range(copies):
+            track.duplicate_clip_to_arrangement(clip, first + n * clip.length)
+    return {"sections": result, "total_bars": int(start) // 4}
+
+
 def undo(song, app, args):
     if not song.can_undo:
         raise OpError("LIVE_STATE", "nothing to undo")
@@ -1001,6 +1050,7 @@ OPS = {
     "fire_scene": (fire_scene, False),
     "stop": (stop, False),
     "play_arrangement": (play_arrangement, False),
+    "arrange": (arrange, True),
     "undo": (undo, False),
     "browse": (browse, False),
     "load_item": (load_item, True),

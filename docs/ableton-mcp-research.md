@@ -264,6 +264,8 @@ Primary reference: [Cycling '74 LOM](https://docs.cycling74.com/apiref/lom/), wr
 
 Session View is the better fit for a beginner tool. Its slots, scenes, `create_clip`, `fire` and scene launch have been in the API since before Live 11. Arrangement MIDI clip creation needs 12.1.10+. The minimum version for audio clip creation in the Arrangement is unclear (above). Locators: `Song.cue_points`, `set_or_delete_cue`, and jumping between cues. Arrangement-specific editing beyond creating and duplicating clips is thin. AbletonOSC lists "Interact with clips in arrangement view" as open ([#124](https://github.com/ideoforms/AbletonOSC/issues/124)).
 
+This project builds in Session View and then copies scenes to the Arrangement with `arrange_scenes`: `Track.duplicate_clip_to_arrangement` per repeat, `Track.arrangement_clips` to check the Arrangement is empty and `Track.delete_clip(clip)` for `replace=true` ([LOM: Track](https://docs.cycling74.com/apiref/lom/track/)). An Arrangement clip's `end_time` is read-only, so a clip that does not divide its section is refused instead of trimmed.
+
 ### 3.6 What the LOM cannot do
 
 | Not possible via LOM | Evidence | Workaround |

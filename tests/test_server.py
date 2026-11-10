@@ -44,6 +44,7 @@ TOOL_NAMES = [
     "play_clip",
     "fire_scene",
     "stop",
+    "arrange_scenes",
     "play_arrangement",
     "undo_last",
     "write_midi_file",
@@ -55,7 +56,7 @@ READ_ONLY_TOOLS = {
     "list_samples",
 }
 DESTRUCTIVE_TOOLS = {
-    "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device",
+    "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device", "arrange_scenes",
     "create_drum_pattern", "create_bassline", "create_chord_progression",
 }
 
@@ -830,6 +831,24 @@ def test_play_arrangement_sends_bar(monkeypatch):
     monkeypatch.setattr(server, "client", fake)
     assert call_tool("play_arrangement").is_error is False
     assert fake.calls == [("hello", {}), ("play_arrangement", {"from_bar": 1})]
+
+
+SECTIONS = [{"scene": 0, "bars": 4}, {"scene": 1, "bars": 8}]
+
+
+def test_arrange_scenes_refused_without_feature(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_1})
+    monkeypatch.setattr(server, "client", fake)
+    result = call_tool("arrange_scenes", {"sections": SECTIONS})
+    assert result.is_error is True and "needs Live 12.4+" in result.content[0].text
+    assert [op for op, _ in fake.calls] == ["hello"]
+
+
+def test_arrange_scenes_sends_sections(monkeypatch):
+    fake = FakeClient({"hello": HELLO_12_4, "arrange": {"total_bars": 12}})
+    monkeypatch.setattr(server, "client", fake)
+    assert call_tool("arrange_scenes", {"sections": SECTIONS, "replace": True}).is_error is False
+    assert fake.calls == [("hello", {}), ("arrange", {"sections": SECTIONS, "replace": True})]
 
 
 def test_insert_device_main(monkeypatch):

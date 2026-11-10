@@ -23,5 +23,5 @@ jobs:
         with:
           version: "0.13.1"
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --locked
+      - run: uv sync --locked --extra hearing
       - run: uv run pytest -q

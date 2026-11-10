@@ -148,3 +148,9 @@ def test_scan_errors(tmp_path):
     (tmp_path / "notes.txt").write_text("hi")
     with pytest.raises(ValueError, match="No audio files"):
         samples.scan(str(tmp_path))
+
+
+def test_duration_from_soundfile_for_non_wav(tmp_path):
+    soundfile = pytest.importorskip("soundfile")  # comes with the hearing extra
+    soundfile.write(str(tmp_path / "tone.flac"), [0.0] * 22050, 44100)
+    assert samples._duration(tmp_path / "tone.flac") == 0.5

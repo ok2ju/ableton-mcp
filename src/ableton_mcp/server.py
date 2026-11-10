@@ -1,6 +1,6 @@
-"""MCP stdio server: 39 tools. 36 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
-Vital synth presets as files (vital.py) and 1 lists a folder of the user's samples (samples.py); those 3 work
-without Live.
+"""MCP stdio server: 40 tools. 36 drive Ableton Live through the AbletonMCP Remote Script; 2 write and read
+Vital synth presets as files (vital.py), 1 lists a folder of the user's samples (samples.py) and 1 estimates a
+sample's tempo and key (hearing.py, optional librosa extra); those 4 work without Live.
 
 Every tool returns a CallToolResult. Bridge failures (LiveUnavailable, LiveTimeout, LiveError)
 become isError results with the message, so the agent can read the advice and recover.
@@ -17,7 +17,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from . import lessons, midifile, samples, theory, vital
+from . import hearing, lessons, midifile, samples, theory, vital
 from .live_client import INSTALL_HINT, PROTOCOL_VERSION, LiveClient, LiveError, LiveTimeout, LiveUnavailable
 
 LITE_TRACK_LIMIT = 8
@@ -558,11 +558,29 @@ def _sample_file(root: str | None, path: list[str] | None, file_path: str | None
 def list_samples(folder: str, limit: int = 200) -> CallToolResult:
     """List the audio files under a folder of the user's samples, recursively; works without Live.
     folder: an absolute path. Returns total (all files found) and files (sorted by path, at most limit), each with
-    path, name, duration_s (WAV only, else null) and guesses from the filename: role (kick, snare, clap, hat, perc,
+    path, name, duration_s (PCM WAV, or any format with the hearing extra; else null) and guesses from the filename: role (kick, snare, clap, hat, perc,
     bass, vocal, pad, chord, lead, fx or null), kind (loop, one_shot or unknown), bpm and key (null when the name
     does not say). Pass a file's path as file_path to create_audio_clip or replace_sample."""
     try:
         return _ok(samples.scan(folder, limit))
+    except ValueError as e:
+        return _error(str(e))
+
+
+@mcp.tool(annotations=READ_ONLY)
+def analyze_sample(file_path: str) -> CallToolResult:
+    """Estimate an audio file's tempo and key from its sound; works without Live. Use it when list_samples shows
+    bpm or key as null. file_path: an absolute path. Returns bpm with bpm_half and bpm_double (beat trackers often
+    land on one of those, so pick the one that fits the music), key such as "A minor" with key_confidence
+    (correlation, up to 1; relative major/minor mix-ups are common), and duration_s. Takes a few seconds per file.
+    Needs the optional hearing extra; without it the error says how to install it."""
+    path = _sample_file(None, None, file_path)
+    if isinstance(path, CallToolResult):
+        return path
+    try:
+        return _ok(hearing.analyze(path))
+    except ImportError:
+        return _error(hearing.INSTALL_HINT)
     except ValueError as e:
         return _error(str(e))
 

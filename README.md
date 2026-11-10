@@ -30,6 +30,12 @@ Register with Claude Code:
 claude mcp add ableton -- uv --directory /path/to/ableton-mcp run ableton-mcp
 ```
 
+Optional: `analyze_sample` (tempo and key from a sample's audio) needs the `hearing` extra, which installs [librosa](https://librosa.org/doc/latest/install.html) with numpy, scipy, scikit-learn, numba and soundfile. The base install stays `mcp` only.
+
+```sh
+uv sync --extra hearing
+```
+
 Check the whole setup:
 
 ```sh
@@ -47,7 +53,7 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 
 ## Tools
 
-`uv run ableton-mcp` runs the stdio server with 39 tools, in this order:
+`uv run ableton-mcp` runs the stdio server with 40 tools, in this order:
 
 | Tool | What it does | Read-only |
 |------|--------------|-----------|
@@ -73,7 +79,8 @@ uv run ableton-mcp call browse '{"root":"drums","path":[]}'
 | `load_instrument` | Load an instrument by kind (drift, simpler, impulse, drum_rack, ...), optionally a preset by name; refuses non-Lite kinds on Lite | no |
 | `read_device` | A device's parameters (name, raw value, min/max, Live's `display` text, switch `items`) and a rack's chains; `device_path` reaches into racks | yes |
 | `set_device_parameters` | Set several parameters of one device by name, in one undo step; all-or-nothing | no |
-| `list_samples` | Audio files under an absolute folder, recursively (hidden and `.asd` files skipped), sorted by path and capped by `limit`, with `total`; each with `duration_s` (PCM WAV only, else null) and filename guesses at `role`, `kind` (loop, one_shot, unknown), `bpm` and `key`; works without Live | yes |
+| `list_samples` | Audio files under an absolute folder, recursively (hidden and `.asd` files skipped), sorted by path and capped by `limit`, with `total`; each with `duration_s` (PCM WAV, or any format with the `hearing` extra; else null) and filename guesses at `role`, `kind` (loop, one_shot, unknown), `bpm` and `key`; works without Live | yes |
+| `analyze_sample` | Tempo (`bpm` with `bpm_half` / `bpm_double`) and key (`key` such as "A minor", `key_confidence`) estimated from an absolute `file_path`'s audio, plus `duration_s`; needs the `hearing` extra; works without Live | yes |
 | `create_audio_clip` | Put a library sample (`samples` / `user_library` root + path) or an absolute `file_path` into an empty Session slot of an audio track; reports `warping` and `length_beats` (Live 12.4+) | no |
 | `replace_sample` | Swap the sample of a Simpler, by `device_path` or by Drum Rack `pad_note` (destructive, one undo step; Live 12.4+) | no |
 | `set_simpler` | A Simpler's playback mode (Classic, One-Shot, Slicing), slicing style, beat division, sensitivity, region count, slicing playback mode, warping and warp mode; optional `reverse` / `crop` (destructive with crop); returns `slice_count` and `slice_times_s`; by `device_path` or `pad_note`, one undo step | no |
@@ -147,6 +154,7 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 - Generators replace the clip in the target slot as one undo step. They never create tracks or load instruments. Melodic clips need an instrument on the track, or they play silent.
 - Samples: the server finds a `samples` name by exact file name in Live's Core Library, `~/Music/Ableton/Factory Packs` and the User Library (a full folder walk per call). A name found twice is refused with the paths; pass one as `file_path`. `user_library` paths are joined onto the User Library folder. Only .wav, .aif, .aiff, .flac, .mp3 and .ogg files are taken.
 - Clips are made in Session slots; `arrange_scenes` copies them onto the Arrangement. It refuses, before placing anything, a clip whose length does not divide its section (Live cannot trim an Arrangement copy: loop the clip with `set_clip`), an unwarped audio clip (its length is in seconds), and an Arrangement that already has clips unless `replace=true`. Group tracks are skipped. Other Arrangement editing is not supported. `create_audio_clip` leaves warping to Live; `set_clip` then changes markers, loop, gain, pitch, warping and warp mode. Warp markers are not supported.
+- `analyze_sample` is an estimate. Beat trackers often land on half or double the tempo, so it returns both candidates; the key often comes out as its relative major or minor (A minor vs C major). It reads the whole file, a few seconds each. Without the `hearing` extra it returns the install command instead.
 - Live has no API to reverse an audio clip: load the sample into a Simpler and use `set_simpler(reverse=true)`. "Slice to Drum Rack" has no API either: `set_simpler` slices inside one Simpler instead.
 - Turning `warping` off converts an audio clip's markers from beats to seconds (4 beats became 2 s at 120 BPM on 12.4.16), so `set_clip` takes `warping` in its own call; `read_clip` it before setting markers.
 - `set_clip` `gain` is Live's raw 0..1; Live's dB curve is undocumented, so the result shows Live's own `gain_display` text instead of converting.
@@ -197,15 +205,16 @@ The `ableton:` prefix is the name the server was registered under (`claude mcp a
 39. `set_simpler(device_path=[0], reverse=true)` plays the sample backwards. One `undo_last` restores it.
 40. Live 12.4 Lite: `live_status` shows `features.arrangement: true`. With a Session clip playing and material in the Arrangement, `play_arrangement(from_bar=3)` stops the Session clip, turns off Back to Arrangement and plays the Arrangement from bar 3. `undo_last` does not undo it.
 41. Live 12.4 Lite: with clips in scenes 0 and 1, `arrange_scenes(sections=[{"scene":0,"bars":4},{"scene":1,"bars":8}])` shows 12 bars of clips in Arrangement View, each scene's clips repeated to fill its section. `play_arrangement` plays them. Calling it again returns the `replace=true` hint; with `replace=true` the old layout is replaced. One `undo_last` removes the whole layout.
+42. With the `hearing` extra, `analyze_sample(file_path="<a loop whose name says its BPM>")` gives that BPM as `bpm`, `bpm_half` or `bpm_double` (no Live needed).
 
 ## Development
 
 ```sh
-uv sync
+uv sync --extra hearing
 uv run pytest -q
 ```
 
-CI (`.github/workflows/test.yml`) runs the suite on Python 3.11 (Live's embedded version) and 3.13 for every push to `main` and every pull request. Keep `src/` and `remote_script/` working on 3.11.
+Without the extra, the librosa tests skip. CI (`.github/workflows/test.yml`) installs the extra and runs the suite on Python 3.11 (Live's embedded version, librosa 0.11) and 3.13 (librosa 1.0) for every push to `main` and every pull request. Keep `src/` and `remote_script/` working on 3.11.
 
 ## License
 

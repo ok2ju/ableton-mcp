@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import sys
 
 import pytest
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
@@ -33,6 +34,7 @@ TOOL_NAMES = [
     "read_device",
     "set_device_parameters",
     "list_samples",
+    "analyze_sample",
     "create_audio_clip",
     "replace_sample",
     "set_simpler",
@@ -53,7 +55,7 @@ TOOL_NAMES = [
 ]
 READ_ONLY_TOOLS = {
     "live_status", "get_set_overview", "read_notes", "read_clip", "browse_library", "read_device", "vital_read_preset",
-    "list_samples",
+    "list_samples", "analyze_sample",
 }
 DESTRUCTIVE_TOOLS = {
     "write_notes", "delete_track", "delete_clip", "replace_sample", "set_simpler", "delete_device", "arrange_scenes",
@@ -729,6 +731,19 @@ def test_list_samples(tmp_path):
     for folder in ("Samples", str(tmp_path / "missing"), str(tmp_path / "Kick.wav")):
         bad = call_tool("list_samples", {"folder": folder})
         assert bad.is_error is True, folder
+
+
+def test_analyze_sample_without_librosa(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "librosa", None)  # makes `import librosa` raise ImportError
+    (tmp_path / "Loop.wav").write_bytes(b"RIFF")
+    result = call_tool("analyze_sample", {"file_path": str(tmp_path / "Loop.wav")})
+    assert result.is_error is True
+    assert "uv sync --extra hearing" in result.content[0].text
+
+    for path in ("Loop.wav", str(tmp_path / "missing.wav"), str(tmp_path)):
+        bad = call_tool("analyze_sample", {"file_path": path})
+        assert bad.is_error is True, path
+        assert "hearing" not in bad.content[0].text, path
 
 
 def test_vital_create_preset_without_standalone(vital_dir, monkeypatch, tmp_path):

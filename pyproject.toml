@@ -6,6 +6,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["mcp[cli]>=2.3,<3"]
 
+[project.optional-dependencies]
+# BPM and key detection for analyze_sample, imported only when the tool runs.
+hearing = ["librosa>=0.11"]
+
 [project.scripts]
 ableton-mcp = "ableton_mcp.cli:main"
 
